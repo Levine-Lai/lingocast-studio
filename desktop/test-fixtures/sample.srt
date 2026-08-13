@@ -1,0 +1,11 @@
+1
+00:00:00,500 --> 00:00:02,800
+Welcome to LingoCast Studio.
+
+2
+00:00:03,000 --> 00:00:05,800
+Edit the timing and translation here.
+
+3
+00:00:06,100 --> 00:00:08,500
+Then review and export the final subtitles.

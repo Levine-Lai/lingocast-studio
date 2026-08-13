@@ -1,0 +1,62 @@
+# This repository publishes only the LingoCast desktop application. The root
+# workspace also contains older prototypes and local tooling that are not part
+# of the open-source product.
+/*
+!/.github/
+!/.gitattributes
+!/.gitignore
+!/.env.example
+!/LICENSE
+!/README.md
+!/desktop/
+
+# Dependencies and generated build output
+/desktop/node_modules/
+/desktop/dist/
+/desktop/src-tauri/target/
+/desktop/src-tauri/gen/
+/desktop/worker/__pycache__/
+/desktop/models/
+/desktop/scripts/export-burned-project.mjs
+/desktop/scripts/reprocess-workspace-projects.mjs
+*.tsbuildinfo
+
+# Personal configuration and secrets
+.env
+.env.*
+!.env.example
+*cookies*.txt
+*.pem
+*.key
+
+# Local application state and user media
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.mp4
+*.mkv
+*.webm
+*.mov
+*.m4v
+*.avi
+*.mp3
+*.wav
+*.flac
+*.vtt
+*.srt
+!/desktop/test-fixtures/*.srt
+
+# Portable binaries and archives are published through GitHub Releases
+*.exe
+*.msi
+*.zip
+*.7z
+
+# Logs and editor files
+*.log
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

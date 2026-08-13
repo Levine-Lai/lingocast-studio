@@ -1,0 +1,39 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "LingoCast Studio",
+  "version": "0.8.8",
+  "identifier": "com.lingocast.studio",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "LingoCast Studio",
+        "width": 1440,
+        "height": 920,
+        "minWidth": 1120,
+        "minHeight": 720,
+        "resizable": true,
+        "center": true,
+        "maximized": true
+      }
+    ],
+    "security": {
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["**"]
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "shortDescription": "本地视频字幕编辑与烧录工作台",
+    "longDescription": "在本机完成视频字幕导入、翻译、编辑、时间轴校准和双语字幕烧录视频导出。"
+  }
+}

@@ -1,0 +1,26 @@
+[package]
+name = "lingocast-studio"
+version = "0.8.8"
+description = "Local-first subtitle editing and rendering studio"
+authors = ["LingoCast"]
+edition = "2021"
+
+[lib]
+name = "lingocast_studio_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tauri = { version = "2", features = ["protocol-asset"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-shell = "2"
+tauri-plugin-sql = { version = "2", features = ["sqlite"] }
+tokio = { version = "1", features = ["fs", "io-util", "macros", "process", "rt"] }
+url = "2"

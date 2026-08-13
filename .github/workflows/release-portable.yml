@@ -1,0 +1,93 @@
+name: Release Windows portable app
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "desktop/**"
+      - ".github/workflows/release-portable.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: portable-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: desktop
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri -> target
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run frontend tests
+        run: npm test
+
+      - name: Run Rust tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: Validate aligned versions
+        shell: pwsh
+        run: |
+          $packageVersion = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $tauriVersion = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          $cargoVersion = (Select-String -Path src-tauri/Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
+          if ($packageVersion -ne $tauriVersion -or $packageVersion -ne $cargoVersion) {
+            throw "Version mismatch: package=$packageVersion tauri=$tauriVersion cargo=$cargoVersion"
+          }
+          "LINGOCAST_VERSION=$packageVersion" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Ensure this version is new
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "v$env:LINGOCAST_VERSION" --repo $env:GITHUB_REPOSITORY 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            throw "Release v$env:LINGOCAST_VERSION already exists. Bump the app version before publishing new code."
+          }
+
+      - name: Build portable application
+        run: npm run tauri -- build --no-bundle
+
+      - name: Prepare portable executable
+        shell: pwsh
+        run: |
+          $name = "LingoCast Studio_$env:LINGOCAST_VERSION`_portable.exe"
+          Copy-Item -LiteralPath "src-tauri/target/release/lingocast-studio.exe" -Destination $name
+          "LINGOCAST_ASSET=$name" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Create GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v$env:LINGOCAST_VERSION" $env:LINGOCAST_ASSET `
+            --repo $env:GITHUB_REPOSITORY `
+            --target $env:GITHUB_SHA `
+            --title "LingoCast Studio v$env:LINGOCAST_VERSION" `
+            --generate-notes
