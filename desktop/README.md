@@ -68,6 +68,6 @@ npm run build
 npm run release:portable
 ```
 
-推送新版本到 GitHub 的 `main` 分支后，仓库级 GitHub Actions 会自动运行测试、构建便携 EXE，并创建对应版本的 GitHub Release。发布前必须提升并同步 `package.json`、`Cargo.toml` 与 `tauri.conf.json` 的版本号。
+推送更新到 GitHub 的 `main` 分支后，仓库级 GitHub Actions 会自动运行测试、构建便携 EXE，并把它作为该次运行的 Artifact 保留 90 天。普通更新不要求修改版本号，也不会自动创建 GitHub Release。
 
 媒体工作进程说明见 [`worker/README.md`](worker/README.md)。

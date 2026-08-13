@@ -63,17 +63,16 @@ npm run release:portable
 
 1. 运行前端与 Rust 测试
 2. 构建 Windows 便携版
-3. 按 `desktop/package.json` 中的版本创建 `vX.Y.Z` Release
-4. 上传对应的便携 EXE
+3. 把便携 EXE 上传到该次 Actions 运行的 Artifacts，保留 90 天
 
-发布新版本前必须同步提升 `package.json`、`Cargo.toml` 和 `tauri.conf.json` 的版本号。已存在的版本不会被静默覆盖。
+普通更新不要求修改版本号，也不会自动创建 GitHub Release。源码提交会永久保存在 GitHub；另一台 Windows 电脑可以从最新一次成功的 Actions 运行中下载便携 EXE，或者克隆源码自行构建。正式对外发布版本时，再手动创建 Release 即可。
 
 ## 隐私与安全
 
 - 不要提交 `.env.local`、Cookie、SQLite 数据库或用户视频
 - YouTube 登录凭证仅保存在本机应用数据目录
 - DeepSeek API Key 只由本地后端读取，不应写入前端源码
-- GitHub Release 只包含编译后的应用，不包含个人素材
+- GitHub Actions 构建产物只包含编译后的应用，不包含个人素材
 
 ## License
 

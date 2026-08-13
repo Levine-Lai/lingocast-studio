@@ -1,4 +1,4 @@
-name: Release Windows portable app
+name: Verify and build Windows portable app
 
 on:
   push:
@@ -9,14 +9,14 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: portable-release
+  group: portable-build-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  release:
+  build:
     runs-on: windows-latest
     defaults:
       run:
@@ -61,25 +61,6 @@ jobs:
           }
           "LINGOCAST_VERSION=$packageVersion" | Out-File -FilePath $env:GITHUB_ENV -Append
 
-      - name: Ensure this version is new
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $headers = @{
-            Authorization = "Bearer $env:GH_TOKEN"
-            Accept = "application/vnd.github+json"
-            "X-GitHub-Api-Version" = "2022-11-28"
-          }
-          $uri = "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/tags/v$env:LINGOCAST_VERSION"
-          $response = Invoke-WebRequest -Uri $uri -Headers $headers -SkipHttpErrorCheck
-          if ($response.StatusCode -eq 200) {
-            throw "Release v$env:LINGOCAST_VERSION already exists. Bump the app version before publishing new code."
-          }
-          if ($response.StatusCode -ne 404) {
-            throw "Unable to check existing releases (HTTP $($response.StatusCode))."
-          }
-
       - name: Build portable application
         run: npm run tauri -- build --no-bundle
 
@@ -88,15 +69,11 @@ jobs:
         run: |
           $name = "LingoCast Studio_$env:LINGOCAST_VERSION`_portable.exe"
           Copy-Item -LiteralPath "src-tauri/target/release/lingocast-studio.exe" -Destination $name
-          "LINGOCAST_ASSET=$name" | Out-File -FilePath $env:GITHUB_ENV -Append
 
-      - name: Create GitHub release
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release create "v$env:LINGOCAST_VERSION" $env:LINGOCAST_ASSET `
-            --repo $env:GITHUB_REPOSITORY `
-            --target $env:GITHUB_SHA `
-            --title "LingoCast Studio v$env:LINGOCAST_VERSION" `
-            --generate-notes
+      - name: Upload portable executable
+        uses: actions/upload-artifact@v7
+        with:
+          name: LingoCast-Studio-Windows-${{ github.run_number }}
+          path: desktop/LingoCast Studio_*_portable.exe
+          if-no-files-found: error
+          retention-days: 90
