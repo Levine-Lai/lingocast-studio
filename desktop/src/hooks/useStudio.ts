@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { normalizeSubtitleStyle, normalizeSubtitleStyleOverride, type ProjectSummary, type StudioProject, type SubtitleCue } from "../types";
 import { createProject, deleteProject, listProjects, loadProject, saveProject } from "../lib/repository";
-import { isTauri } from "../lib/platform";
+import { isTauri, localVideoUrl } from "../lib/platform";
 import { normalizeSubtitleEditorText } from "../lib/srt";
 import { transitionHistoryGroup, type HistoryUpdateOptions } from "../lib/historyGroup";
 
@@ -31,8 +31,13 @@ async function hydrateProject(loaded: StudioProject | null) {
     if (changed) loaded = await saveProject({ ...loaded, cues, subtitleStyle });
   }
   if (loaded && isTauri()) {
-    const { convertFileSrc } = await import("@tauri-apps/api/core");
-    loaded.videoUrl = convertFileSrc(loaded.videoPath);
+    try {
+      loaded.videoUrl = await localVideoUrl(loaded.videoPath);
+    } catch {
+      // Keep a project editable when its original media was moved. Export will
+      // still give a precise missing-file error instead of blocking the studio.
+      loaded.videoUrl = undefined;
+    }
   }
   return loaded;
 }

@@ -10,12 +10,30 @@ declare global {
 
 export const isTauri = () => typeof window !== "undefined" && Boolean(window.__TAURI_INTERNALS__);
 
+export async function authorizeVideoAsset(path: string) {
+  if (!isTauri()) return;
+  const { invoke } = await import("@tauri-apps/api/core");
+  await invoke("authorize_video_asset", { path });
+}
+
+export async function localVideoUrl(path: string) {
+  if (!isTauri()) return undefined;
+  const { convertFileSrc } = await import("@tauri-apps/api/core");
+  await authorizeVideoAsset(path);
+  return convertFileSrc(path);
+}
+
 function safeExportFilename(name: string) {
   return name.replace(/[<>:"/\\|?*\u0000-\u001F]/g, "_").trim().slice(0, 96) || "LingoCast";
 }
 
 function exportPath(directory: string, filename: string) {
   return `${directory.replace(/[\\/]$/, "")}\\${filename}`;
+}
+
+export function resolveBurnDurationMs(cues: SubtitleCue[], videoDurationMs: number) {
+  const cueEndMs = cues.reduce((latest, cue) => Math.max(latest, cue.endMs), 0);
+  return Math.max(Number.isFinite(videoDurationMs) ? videoDurationMs : 0, cueEndMs);
 }
 
 type YoutubeProgressEvent = {
@@ -45,7 +63,7 @@ export async function downloadYoutubeVideo(
   onProgress: (progress: Omit<YoutubeProgressEvent, "jobId">) => void,
 ): Promise<{ path: string; url: string; name: string; subtitles: DownloadedSubtitleTrack[]; sourceContext: VideoSourceContext }> {
   if (!isTauri()) throw new Error("YouTube 下载只能在桌面软件中运行");
-  const [{ invoke, convertFileSrc }, { listen }] = await Promise.all([
+  const [{ invoke }, { listen }] = await Promise.all([
     import("@tauri-apps/api/core"),
     import("@tauri-apps/api/event"),
   ]);
@@ -65,7 +83,7 @@ export async function downloadYoutubeVideo(
       cookiePath: cookiePath.trim() || null,
       browserProfile: cookiePath.trim() ? null : browserProfile.trim() || null,
     });
-    return { ...downloaded, url: convertFileSrc(downloaded.path) };
+    return { ...downloaded, url: await localVideoUrl(downloaded.path) ?? "" };
   } finally {
     unlisten();
   }
@@ -121,7 +139,7 @@ export async function reviewYoutubeSubtitleContext(cues: SubtitleCue[], sourceCo
 
 export async function pickVideoFile(): Promise<{ path: string; url: string; name: string } | null> {
   if (!isTauri()) return null;
-  const [{ open }, { convertFileSrc }] = await Promise.all([
+  const [{ open }] = await Promise.all([
     import("@tauri-apps/plugin-dialog"),
     import("@tauri-apps/api/core"),
   ]);
@@ -132,7 +150,7 @@ export async function pickVideoFile(): Promise<{ path: string; url: string; name
   });
   if (!path) return null;
   const name = path.split(/[\\/]/).pop()?.replace(/\.[^.]+$/, "") || "未命名视频";
-  return { path, url: convertFileSrc(path), name };
+  return { path, url: await localVideoUrl(path) ?? "", name };
 }
 
 export async function pickSubtitleFile(): Promise<{ path: string; cues: SubtitleCue[] } | null> {
@@ -193,7 +211,11 @@ export async function burnSubtitleVideo(
     filters: [{ name: "MP4 视频", extensions: ["mp4"] }],
   });
   if (!outputPath) return null;
-  const { overlays, blankPngBase64 } = await renderBurnOverlays(project.cues, project.subtitleStyle, onProgress);
+  const durationMs = resolveBurnDurationMs(project.cues, project.durationMs);
+  if (!Number.isFinite(durationMs) || durationMs <= 0) {
+    throw new Error("无法读取视频时长，请等待视频加载完成或重新导入可播放的视频后再烧录");
+  }
+  const { overlayBundleBase64 } = await renderBurnOverlays(project.cues, project.subtitleStyle, onProgress);
   const jobId = crypto.randomUUID();
   const unlisten = await listen<{ jobId: string; percent: number }>("video-burn-progress", (event) => {
     if (event.payload.jobId === jobId) onProgress(10 + event.payload.percent * 0.9);
@@ -203,10 +225,9 @@ export async function burnSubtitleVideo(
       videoPath: project.videoPath,
       outputPath,
       style: project.subtitleStyle,
-      durationMs: Math.max(project.durationMs, project.cues.at(-1)?.endMs ?? 0),
+      durationMs,
       jobId,
-      overlays,
-      blankPngBase64,
+      overlayBundleBase64,
       cues: project.cues.map((cue) => ({
         startMs: cue.startMs,
         endMs: cue.endMs,

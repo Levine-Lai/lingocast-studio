@@ -6,7 +6,7 @@ export const SUBTITLE_CANVAS_HEIGHT = 1080;
 export type BurnOverlay = {
   startMs: number;
   endMs: number;
-  pngBase64: string;
+  png: Blob;
 };
 
 export function buildSubtitleRenderTimeline(cues: SubtitleCue[]) {
@@ -164,12 +164,22 @@ function roundedRect(
   context.roundRect(x, y, width, height, safeRadius);
 }
 
-async function loadStyleFonts(style: SubtitleStyle) {
-  if (!document.fonts) return;
-  await Promise.allSettled([
-    document.fonts.load(canvasFont(style, style.sourceFontSize, style.sourceFontFamily)),
-    document.fonts.load(canvasFont(style, style.targetFontSize, style.targetFontFamily)),
-  ]);
+const fontLoadCache = new Map<string, Promise<unknown>>();
+
+function loadStyleFonts(style: SubtitleStyle) {
+  if (!document.fonts) return Promise.resolve();
+  const fonts = [
+    canvasFont(style, style.sourceFontSize, style.sourceFontFamily),
+    canvasFont(style, style.targetFontSize, style.targetFontFamily),
+  ];
+  return Promise.all(fonts.map((font) => {
+    let loading = fontLoadCache.get(font);
+    if (!loading) {
+      loading = document.fonts.load(font).catch(() => undefined);
+      fontLoadCache.set(font, loading);
+    }
+    return loading;
+  }));
 }
 
 function canvasToPng(canvas: HTMLCanvasElement) {
@@ -187,10 +197,47 @@ function blobToBase64(blob: Blob) {
   });
 }
 
-export async function renderSubtitlePng(cue: SubtitleCue, inputStyle: SubtitleStyle) {
+function uint32(value: number) {
+  const bytes = new Uint8Array(4);
+  new DataView(bytes.buffer).setUint32(0, value, true);
+  return bytes;
+}
+
+function overlayHeader(startMs: number, endMs: number, pngBytes: number) {
+  const bytes = new Uint8Array(20);
+  const view = new DataView(bytes.buffer);
+  view.setFloat64(0, startMs, true);
+  view.setFloat64(8, endMs, true);
+  view.setUint32(16, pngBytes, true);
+  return bytes;
+}
+
+async function packBurnOverlays(overlays: BurnOverlay[], blankPng: Blob) {
+  if (typeof CompressionStream === "undefined") {
+    throw new Error("当前系统不支持字幕烧录压缩，请更新 Windows WebView2 后重试");
+  }
+  const parts: BlobPart[] = [
+    new Uint8Array([0x4c, 0x43, 0x4f, 0x56, 0x31]), // LCOV1
+    uint32(overlays.length),
+    uint32(blankPng.size),
+    blankPng,
+  ];
+  for (const overlay of overlays) {
+    parts.push(overlayHeader(overlay.startMs, overlay.endMs, overlay.png.size), overlay.png);
+  }
+  const raw = new Blob(parts, { type: "application/octet-stream" });
+  const compressed = await new Response(raw.stream().pipeThrough(new CompressionStream("gzip"))).blob();
+  return blobToBase64(compressed);
+}
+
+export async function renderSubtitlePng(
+  cue: SubtitleCue,
+  inputStyle: SubtitleStyle,
+  reusableCanvas?: HTMLCanvasElement,
+) {
   const style = normalizeSubtitleStyle(inputStyle);
   await loadStyleFonts(style);
-  const canvas = document.createElement("canvas");
+  const canvas = reusableCanvas ?? document.createElement("canvas");
   canvas.width = SUBTITLE_CANVAS_WIDTH;
   canvas.height = SUBTITLE_CANVAS_HEIGHT;
   const context = canvas.getContext("2d");
@@ -277,17 +324,20 @@ export async function renderBurnOverlays(
 ) {
   const renderTimeline = buildSubtitleRenderTimeline(cues);
   const overlays: BurnOverlay[] = [];
+  // Keep preview and export rendering identical while avoiding a new 1080p
+  // canvas allocation for every cue in long videos.
+  const reusableCanvas = document.createElement("canvas");
   for (const [index, cue] of renderTimeline.entries()) {
     if (!cue.sourceText.trim() && !cue.targetText.trim()) continue;
     const style = normalizeSubtitleStyle({ ...projectStyle, ...cue.subtitleStyle });
-    const pngBase64 = await blobToBase64(await renderSubtitlePng(cue, style));
-    overlays.push({ startMs: cue.startMs, endMs: cue.endMs, pngBase64 });
+    const png = await renderSubtitlePng(cue, style, reusableCanvas);
+    overlays.push({ startMs: cue.startMs, endMs: cue.endMs, png });
     onProgress(((index + 1) / Math.max(1, renderTimeline.length)) * 10);
-    if (index % 8 === 7) await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+    if (index % 2 === 1) await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
   }
   const blankCanvas = document.createElement("canvas");
   blankCanvas.width = SUBTITLE_CANVAS_WIDTH;
   blankCanvas.height = SUBTITLE_CANVAS_HEIGHT;
-  const blankPngBase64 = await blobToBase64(await canvasToPng(blankCanvas));
-  return { overlays, blankPngBase64 };
+  const blankPng = await canvasToPng(blankCanvas);
+  return { overlayBundleBase64: await packBurnOverlays(overlays, blankPng) };
 }

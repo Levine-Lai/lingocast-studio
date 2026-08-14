@@ -126,12 +126,6 @@ export type ProjectSummary = Pick<
   "id" | "name" | "videoPath" | "durationMs" | "createdAt" | "updatedAt" | "burnedAt"
 > & { cueCount: number };
 
-export type QualityIssue = {
-  cueId: string;
-  level: "error" | "warning";
-  message: string;
-};
-
 export type YoutubeDownloadState = {
   active: boolean;
   percent: number;

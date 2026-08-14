@@ -116,7 +116,6 @@ export async function deleteProject(projectId: string) {
   }
   const db = await getDatabase();
   await db.execute("DELETE FROM cues WHERE project_id = $1", [projectId]);
-  await db.execute("DELETE FROM jobs WHERE project_id = $1", [projectId]);
   await db.execute("DELETE FROM project_contexts WHERE project_id = $1", [projectId]);
   await db.execute("DELETE FROM projects WHERE id = $1", [projectId]);
 }

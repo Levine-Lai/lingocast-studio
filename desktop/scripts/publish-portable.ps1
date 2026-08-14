@@ -44,15 +44,24 @@ if (-not (Test-Path -LiteralPath $sourceExecutable -PathType Leaf)) {
 
 New-Item -ItemType Directory -Path $portableDirectory -Force | Out-Null
 
+$sourceHash = (Get-FileHash -LiteralPath $sourceExecutable -Algorithm SHA256).Hash
 $copyRequired = -not (Test-Path -LiteralPath $portableExecutable -PathType Leaf)
 if (-not $copyRequired) {
-  $sourceHash = (Get-FileHash -LiteralPath $sourceExecutable -Algorithm SHA256).Hash
   $portableHash = (Get-FileHash -LiteralPath $portableExecutable -Algorithm SHA256).Hash
   $copyRequired = $sourceHash -ne $portableHash
 }
 
 if ($copyRequired) {
-  Copy-Item -LiteralPath $sourceExecutable -Destination $portableExecutable -Force
+  try {
+    Copy-Item -LiteralPath $sourceExecutable -Destination $portableExecutable -Force
+  }
+  catch [System.IO.IOException] {
+    # Explorer or antivirus can briefly lock the previous portable executable.
+    # Keep the desktop shortcut current by publishing this build under a content-addressed name.
+    $portableExecutable = Join-Path $portableDirectory "LingoCast Studio_${version}_portable_$($sourceHash.Substring(0, 8)).exe"
+    Copy-Item -LiteralPath $sourceExecutable -Destination $portableExecutable -Force
+    Write-Warning "The previous portable executable is locked. The shortcut now targets the new build: $portableExecutable"
+  }
 }
 
 $desktopDirectory = [Environment]::GetFolderPath([Environment+SpecialFolder]::DesktopDirectory)

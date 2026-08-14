@@ -1,7 +1,9 @@
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use flate2::read::GzDecoder;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
+    io::Read,
     path::{Path, PathBuf},
     process::Stdio,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -70,6 +72,28 @@ fn safe_file_name(value: &str) -> String {
     } else {
         cleaned
     }
+}
+
+fn is_supported_video_path(path: &Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|value| value.to_str())
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("mp4" | "mkv" | "webm" | "mov" | "m4v" | "avi")
+    )
+}
+
+#[tauri::command]
+fn authorize_video_asset(app: AppHandle, path: String) -> Result<(), String> {
+    let path = std::fs::canonicalize(path.trim())
+        .map_err(|_| "找不到需要播放的视频文件，请重新导入".to_string())?;
+    if !path.is_file() || !is_supported_video_path(&path) {
+        return Err("只允许授权已导入的视频文件".to_string());
+    }
+    app.asset_protocol_scope()
+        .allow_file(&path)
+        .map_err(|error| format!("无法授权视频预览：{error}"))
 }
 
 #[tauri::command]
@@ -147,7 +171,7 @@ struct BurnCueInput {
 struct BurnOverlayInput {
     start_ms: f64,
     end_ms: f64,
-    png_base64: String,
+    png_bytes: Vec<u8>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -406,6 +430,112 @@ async fn next_lossy_line<R: AsyncBufRead + Unpin>(
         buffer.pop();
     }
     Ok(Some(String::from_utf8_lossy(buffer).into_owned()))
+}
+
+fn parse_progress_micros(line: &str) -> Option<f64> {
+    // FFmpeg's legacy `out_time_ms` field is, despite its name, emitted in
+    // microseconds. Newer builds also emit the explicitly named `out_time_us`.
+    line.strip_prefix("out_time_us=")
+        .or_else(|| line.strip_prefix("out_time_ms="))
+        .and_then(|value| value.parse::<f64>().ok())
+}
+
+fn read_bundle_u32(reader: &mut impl Read) -> Result<u32, String> {
+    let mut bytes = [0_u8; 4];
+    reader
+        .read_exact(&mut bytes)
+        .map_err(|error| format!("无法读取字幕图层压缩包：{error}"))?;
+    Ok(u32::from_le_bytes(bytes))
+}
+
+fn read_bundle_f64(reader: &mut impl Read) -> Result<f64, String> {
+    let mut bytes = [0_u8; 8];
+    reader
+        .read_exact(&mut bytes)
+        .map_err(|error| format!("无法读取字幕图层压缩包：{error}"))?;
+    Ok(f64::from_le_bytes(bytes))
+}
+
+fn decode_overlay_bundle(encoded: &str) -> Result<(Vec<BurnOverlayInput>, Vec<u8>), String> {
+    const MAGIC: &[u8; 5] = b"LCOV1";
+    const MAX_OVERLAYS: u32 = 20_000;
+    const MAX_IMAGE_BYTES: u32 = 32 * 1024 * 1024;
+
+    let compressed = BASE64
+        .decode(encoded)
+        .map_err(|error| format!("无法解码字幕图层压缩包：{error}"))?;
+    let mut reader = GzDecoder::new(compressed.as_slice());
+    let mut magic = [0_u8; 5];
+    reader
+        .read_exact(&mut magic)
+        .map_err(|error| format!("无法读取字幕图层压缩包：{error}"))?;
+    if &magic != MAGIC {
+        return Err("字幕图层压缩包格式无效".to_string());
+    }
+    let count = read_bundle_u32(&mut reader)?;
+    if count > MAX_OVERLAYS {
+        return Err("字幕图层数量超出安全上限".to_string());
+    }
+    let blank_len = read_bundle_u32(&mut reader)?;
+    if blank_len == 0 || blank_len > MAX_IMAGE_BYTES {
+        return Err("透明字幕图层大小无效".to_string());
+    }
+    let mut blank_png = vec![0_u8; blank_len as usize];
+    reader
+        .read_exact(&mut blank_png)
+        .map_err(|error| format!("无法读取透明字幕图层：{error}"))?;
+
+    let mut overlays = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        let start_ms = read_bundle_f64(&mut reader)?;
+        let end_ms = read_bundle_f64(&mut reader)?;
+        let image_len = read_bundle_u32(&mut reader)?;
+        if !start_ms.is_finite() || !end_ms.is_finite() || image_len == 0 || image_len > MAX_IMAGE_BYTES {
+            return Err("字幕图层数据无效".to_string());
+        }
+        let mut png_bytes = vec![0_u8; image_len as usize];
+        reader
+            .read_exact(&mut png_bytes)
+            .map_err(|error| format!("无法读取字幕图层：{error}"))?;
+        overlays.push(BurnOverlayInput {
+            start_ms,
+            end_ms,
+            png_bytes,
+        });
+    }
+    Ok((overlays, blank_png))
+}
+
+async fn probe_video_duration_ms(video_path: &str) -> Result<f64, String> {
+    let mut command = Command::new("ffprobe");
+    command.args([
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=nw=1:nk=1",
+        video_path,
+    ]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.as_std_mut().creation_flags(0x08000000);
+    }
+    let output = command
+        .output()
+        .await
+        .map_err(|error| format!("无法启动 ffprobe 读取视频时长：{error}"))?;
+    if !output.status.success() {
+        return Err("无法读取视频时长，请确认视频文件可播放且已安装 FFmpeg".to_string());
+    }
+    let seconds = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .ok_or_else(|| "视频时长无效，请重新导入完整视频".to_string())?;
+    Ok(seconds * 1_000.0)
 }
 
 async fn find_downloaded_video(directory: &Path, video_id: &str) -> Option<std::path::PathBuf> {
@@ -1413,14 +1543,11 @@ async fn download_youtube(
 async fn write_overlay_timeline(
     temp_dir: &Path,
     overlays: &[BurnOverlayInput],
-    blank_png_base64: &str,
+    blank_png: &[u8],
     duration_ms: f64,
 ) -> Result<PathBuf, String> {
-    let blank = BASE64
-        .decode(blank_png_base64)
-        .map_err(|error| format!("无法解码透明字幕图层：{error}"))?;
     let blank_path = temp_dir.join("overlay-blank.png");
-    tokio::fs::write(&blank_path, blank)
+    tokio::fs::write(&blank_path, blank_png)
         .await
         .map_err(|error| format!("无法写入透明字幕图层：{error}"))?;
 
@@ -1443,10 +1570,7 @@ async fn write_overlay_timeline(
             cursor_ms = start_ms;
         }
         let image_name = format!("overlay-{index:05}.png");
-        let image = BASE64
-            .decode(&overlay.png_base64)
-            .map_err(|error| format!("无法解码第 {} 条字幕图层：{error}", index + 1))?;
-        tokio::fs::write(temp_dir.join(&image_name), image)
+        tokio::fs::write(temp_dir.join(&image_name), &overlay.png_bytes)
             .await
             .map_err(|error| format!("无法写入第 {} 条字幕图层：{error}", index + 1))?;
         let visible_start = cursor_ms.max(start_ms);
@@ -1618,7 +1742,7 @@ async fn run_burn_video<F>(
     output_path: String,
     cues: Vec<BurnCueInput>,
     overlays: Vec<BurnOverlayInput>,
-    blank_png_base64: String,
+    blank_png: Vec<u8>,
     style: BurnStyleInput,
     duration_ms: f64,
     mut on_progress: F,
@@ -1633,9 +1757,21 @@ where
     if cues.is_empty() {
         return Err("当前项目没有可烧录的字幕".to_string());
     }
+    if !cues
+        .iter()
+        .any(|cue| !cue.source_text.trim().is_empty() || !cue.target_text.trim().is_empty())
+    {
+        return Err("当前项目没有可烧录的有效字幕".to_string());
+    }
     if input == Path::new(&output_path) {
         return Err("导出路径不能覆盖原视频，请选择新的文件名".to_string());
     }
+    if !duration_ms.is_finite() || duration_ms <= 0.0 {
+        return Err("视频时长无效，请等待视频加载完成后再烧录".to_string());
+    }
+    // Frontend metadata can still be pending or stale. The media file itself
+    // is the source of truth for timeline clipping and progress reporting.
+    let duration_ms = probe_video_duration_ms(&video_path).await?;
 
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1646,14 +1782,20 @@ where
     tokio::fs::create_dir_all(&temp_dir)
         .await
         .map_err(|error| format!("无法创建烧录临时目录：{error}"))?;
-    let use_raster_overlays = !overlays.is_empty() && !blank_png_base64.is_empty();
-    if use_raster_overlays {
-        write_overlay_timeline(&temp_dir, &overlays, &blank_png_base64, duration_ms).await?;
+    let use_raster_overlays = !overlays.is_empty() && !blank_png.is_empty();
+    let preparation = if use_raster_overlays {
+        write_overlay_timeline(&temp_dir, &overlays, &blank_png, duration_ms)
+            .await
+            .map(|_| ())
     } else {
         let ass_path = temp_dir.join("subtitles.ass");
         tokio::fs::write(&ass_path, build_ass(&cues, &style))
             .await
-            .map_err(|error| format!("无法生成烧录字幕：{error}"))?;
+            .map_err(|error| format!("无法生成烧录字幕：{error}"))
+    };
+    if let Err(error) = preparation {
+        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+        return Err(error);
     }
 
     let mut command = Command::new("ffmpeg");
@@ -1735,10 +1877,7 @@ where
         .await
         .map_err(|error| format!("无法读取 FFmpeg 烧录进度：{error}"))?
     {
-        let elapsed_micros = line
-            .strip_prefix("out_time_us=")
-            .or_else(|| line.strip_prefix("out_time_ms="))
-            .and_then(|value| value.parse::<f64>().ok());
+        let elapsed_micros = parse_progress_micros(&line);
         if let Some(elapsed_micros) = elapsed_micros {
             let percent = if duration_ms > 0.0 {
                 (elapsed_micros / (duration_ms * 1_000.0) * 100.0).clamp(0.0, 99.5)
@@ -1788,12 +1927,12 @@ async fn burn_video(
     video_path: String,
     output_path: String,
     cues: Vec<BurnCueInput>,
-    overlays: Vec<BurnOverlayInput>,
-    blank_png_base64: String,
+    overlay_bundle_base64: String,
     style: BurnStyleInput,
     duration_ms: f64,
     job_id: String,
 ) -> Result<BurnedVideoOutput, String> {
+    let (overlays, blank_png) = decode_overlay_bundle(&overlay_bundle_base64)?;
     let progress_app = app.clone();
     let progress_job_id = job_id.clone();
     let _ = app.emit(
@@ -1808,7 +1947,7 @@ async fn burn_video(
         output_path,
         cues,
         overlays,
-        blank_png_base64,
+        blank_png,
         style,
         duration_ms,
         move |percent| {
@@ -1905,6 +2044,12 @@ pub fn run() {
         "#,
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 6,
+            description: "remove_unused_jobs_table",
+            sql: "DROP TABLE IF EXISTS jobs;",
+            kind: MigrationKind::Up,
+        },
     ];
 
     tauri::Builder::default()
@@ -1913,6 +2058,7 @@ pub fn run() {
             open_youtube_login,
             review_youtube_subtitle_context,
             translate_subtitles,
+            authorize_video_asset,
             ensure_export_directory,
             burn_video
         ])
@@ -1931,12 +2077,16 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_ass, export_youtube_cover, find_downloaded_video, next_lossy_line,
-        parse_deepseek_json, parse_term_review_json, run_burn_video, safe_file_name, srt_blocks,
-        validate_youtube_url, youtube_download_error, youtube_id_from_video_path, BurnCueInput,
-        BurnOverlayInput, BurnStyleInput,
+        build_ass, decode_overlay_bundle, export_youtube_cover, find_downloaded_video,
+        is_supported_video_path, next_lossy_line, parse_deepseek_json, parse_progress_micros,
+        parse_term_review_json, run_burn_video, safe_file_name, srt_blocks, validate_youtube_url,
+        youtube_download_error, youtube_id_from_video_path, BurnCueInput, BurnOverlayInput,
+        BurnStyleInput, BASE64,
     };
+    use base64::Engine as _;
+    use flate2::{write::GzEncoder, Compression};
     use std::{
+        io::Write,
         path::Path,
         time::{SystemTime, UNIX_EPOCH},
     };
@@ -1947,6 +2097,46 @@ mod tests {
         assert!(validate_youtube_url("https://www.youtube.com/watch?v=dQw4w9WgXcQ").is_ok());
         assert!(validate_youtube_url("https://youtu.be/dQw4w9WgXcQ").is_ok());
         assert!(validate_youtube_url("https://music.youtube.com/watch?v=dQw4w9WgXcQ").is_ok());
+    }
+
+    #[test]
+    fn only_video_extensions_can_be_authorized_for_asset_playback() {
+        assert!(is_supported_video_path(Path::new("C:/clips/interview.mp4")));
+        assert!(is_supported_video_path(Path::new("C:/clips/interview.MKV")));
+        assert!(!is_supported_video_path(Path::new("C:/Users/me/.env")));
+        assert!(!is_supported_video_path(Path::new("C:/Users/me/private.txt")));
+    }
+
+    #[test]
+    fn ffmpeg_progress_aliases_are_both_microseconds() {
+        assert_eq!(parse_progress_micros("out_time_us=200000"), Some(200_000.0));
+        assert_eq!(parse_progress_micros("out_time_ms=200000"), Some(200_000.0));
+        assert_eq!(parse_progress_micros("progress=continue"), None);
+    }
+
+    #[test]
+    fn decodes_compact_raster_overlay_bundle() {
+        let blank = vec![1_u8, 2, 3];
+        let image = vec![4_u8, 5, 6, 7];
+        let mut raw = Vec::new();
+        raw.extend_from_slice(b"LCOV1");
+        raw.extend_from_slice(&1_u32.to_le_bytes());
+        raw.extend_from_slice(&(blank.len() as u32).to_le_bytes());
+        raw.extend_from_slice(&blank);
+        raw.extend_from_slice(&250.0_f64.to_le_bytes());
+        raw.extend_from_slice(&1_250.0_f64.to_le_bytes());
+        raw.extend_from_slice(&(image.len() as u32).to_le_bytes());
+        raw.extend_from_slice(&image);
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&raw).unwrap();
+        let encoded = BASE64.encode(encoder.finish().unwrap());
+
+        let (overlays, decoded_blank) = decode_overlay_bundle(&encoded).unwrap();
+        assert_eq!(decoded_blank, blank);
+        assert_eq!(overlays.len(), 1);
+        assert_eq!(overlays[0].start_ms, 250.0);
+        assert_eq!(overlays[0].end_ms, 1_250.0);
+        assert_eq!(overlays[0].png_bytes, image);
     }
 
     #[test]
@@ -2086,6 +2276,7 @@ mod tests {
         assert!(status.success());
         let mut progress = Vec::new();
         let transparent_png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+        let transparent_png_bytes = BASE64.decode(transparent_png).unwrap();
         let result = run_burn_video(
             input.to_string_lossy().into_owned(),
             output.to_string_lossy().into_owned(),
@@ -2099,9 +2290,9 @@ mod tests {
             vec![BurnOverlayInput {
                 start_ms: 0.0,
                 end_ms: 900.0,
-                png_base64: transparent_png.to_string(),
+                png_bytes: transparent_png_bytes.clone(),
             }],
-            transparent_png.to_string(),
+            transparent_png_bytes,
             BurnStyleInput::default(),
             1_000.0,
             |percent| progress.push(percent),

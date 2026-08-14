@@ -269,24 +269,6 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .row-height-control { display: flex; align-items: center; gap: 6px; margin-left: 4px; color: #8f9789; font-size: 9px; }
 .row-height-control input { width: 72px; accent-color: var(--lime); }
 
-.quality-panel { min-height: 0; padding: 15px 13px; overflow-y: auto; background: #181b17; }
-.quality-panel header { display: flex; align-items: baseline; justify-content: space-between; padding: 0 2px 13px; }
-.quality-panel header strong { font-size: 11px; }
-.quality-panel header small { color: var(--muted); font-size: 8px; }
-.quality-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; }
-.quality-stats div { display: flex; align-items: center; min-width: 0; padding: 8px 5px; flex-direction: column; border: 1px solid #2c312a; border-radius: 5px; background: #141713; }
-.quality-stats span { color: #d7dfcf; font-size: 14px; font-weight: 700; }
-.quality-stats small { margin-top: 3px; color: #737b70; font-size: 7px; }
-.issue-list { display: flex; gap: 5px; margin-top: 12px; flex-direction: column; }
-.issue-list button { display: grid; grid-template-columns: 19px 1fr; align-items: center; gap: 7px; padding: 7px; border: 1px solid #2d322b; border-radius: 5px; background: #151815; color: #aeb4aa; font-size: 8px; text-align: left; cursor: pointer; }
-.issue-list button:hover { border-color: #4a5145; }
-.issue-list button > span:first-child { display: grid; place-items: center; width: 18px; height: 18px; border-radius: 50%; }
-.issue-list .error { color: #ffb2aa; background: #5d2c28; }
-.issue-list .warning { color: #f2d392; background: #524627; }
-.quality-pass { display: grid; place-items: center; padding: 28px 5px; color: #839178; text-align: center; }
-.quality-pass span { display: grid; place-items: center; width: 28px; height: 28px; border: 1px solid #4a5b3c; border-radius: 50%; color: var(--lime); }
-.quality-pass p { font-size: 8px; }
-
 .cue-list-panel { grid-column: 1 / -1; display: flex; min-height: 0; flex-direction: column; border-top: 1px solid var(--line); background: #151815; }
 .cue-list-header, .cue-row { display: grid; grid-template-columns: 48px 146px 105px minmax(480px, 1fr); }
 .cue-list-header { min-height: 34px; align-items: center; padding: 0 12px; border-bottom: 1px solid var(--line); color: #899184; font-size: 10px; text-transform: uppercase; }
