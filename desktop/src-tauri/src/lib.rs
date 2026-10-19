@@ -126,8 +126,11 @@ struct DownloadedVideo {
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct VideoSourceContext {
+    #[serde(default)]
     title: String,
+    #[serde(default)]
     description: String,
+    #[serde(default)]
     channel: String,
     #[serde(default)]
     verified_terms: Vec<String>,
@@ -1071,7 +1074,11 @@ async fn translate_subtitles(
         .map_err(|error| format!("无法初始化 MyMemory 翻译：{error}"))?;
     let mut result = Vec::with_capacity(cues.len());
     for cue in cues.iter() {
-        let target_text = translate_with_mymemory(&client, &cue.source_text).await?;
+        let target_text = if cue.source_text.trim().is_empty() {
+            String::new()
+        } else {
+            translate_with_mymemory(&client, &cue.source_text).await?
+        };
         result.push(TranslatedSubtitleCue {
             id: cue.id.clone(),
             source_text: cue.source_text.clone(),

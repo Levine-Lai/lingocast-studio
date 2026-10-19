@@ -20,6 +20,7 @@
 /desktop/src-tauri/gen/
 /desktop/worker/__pycache__/
 /desktop/models/
+/desktop/.automation/
 /desktop/scripts/export-burned-project.mjs
 /desktop/scripts/reprocess-workspace-projects.mjs
 *.tsbuildinfo

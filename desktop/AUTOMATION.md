@@ -1,4 +1,4 @@
-# Agent / 自动化接口（0.9.2）
+# Agent / 自动化接口（0.9.3）
 
 需要 Windows、Node.js 22+、FFmpeg / ffprobe；YouTube 下载另需 yt-dlp。任何能够执行命令的 agent 都可以调用，不依赖 Codex、浏览器调试端口或鼠标坐标。
 
@@ -54,6 +54,20 @@ stdout 返回一行 `{"ok":true,"result":...}` 或 `{"ok":false,"error":"..."}`�
 除 import/youtube 外，projectId 可省略以使用当前项目。建议显式提供，避免操作错项目。字幕字段与样式定义见 `src/types.ts`。`replace-cues` 会生成新 ID；后续操作先重新 `get`。空 cues 数组表示清空字幕。重叠 cue 可以用于注释轨道。烧录复用界面 Canvas 栅格和剪辑逻辑，无保存对话框；输出文件会被覆盖，不能指定原视频路径。
 
 人工编辑与自动化不要同时进行；有未保存内容或软件正在下载/翻译/烧录时请求会被拒绝。自动化任务串行执行；长任务期间后续请求也会等待。英文导入后可能触发软件自带的自动翻译，可用 status 检查 busy。翻译效果与外部服务可用性仍需审核。
+
+## 一条命令生成字幕项目
+
+`auto-subtitle.mjs` 复用 video-subs 的下载缓存和 DeepSeek 翻译，自动完成：素材准备 → 语义分句/翻译 → Whisper 词级时间戳 → 对齐与间隙校准 → 写入软件。首次运行会启动自动化实例。
+
+```powershell
+node scripts/auto-subtitle.mjs --url "https://www.youtube.com/watch?v=VIDEO_ID"
+node scripts/auto-subtitle.mjs --url "https://www.youtube.com/watch?v=VIDEO_ID" `
+  --verified-json "@verified.json" --corrections-json "@corrections.json"
+```
+
+可选参数：`--name` 项目名、`--model small.en` Whisper 模型、`--skip-align` 跳过词级对齐、`--keep-temp` 保留临时数据库。`--verified-json` 是确认过的专名数组，`--corrections-json` 是 `{"错误":"正确"}` 映射；省略时只做通用翻译和上下文校正。
+
+依赖：`VIDEO_SUBS_SKILL`（默认 `%USERPROFILE%\.codex\skills\video-subs`）、`python` + `faster_whisper`、`yt-dlp`、FFmpeg，以及 `%APPDATA%\com.lingocast.studio\.env.local` 中的 DeepSeek Key。配置 Key 时默认使用 DeepSeek；没有 Key 时自动回退 MyMemory，也可用 `VIDEO_SUBS_TRANSLATOR=mymemory` 强制回退。命令成功时 stdout 输出项目 ID、字幕数、覆盖率相关统计和间隙分布。
 
 ## 本地协议与故障恢复
 

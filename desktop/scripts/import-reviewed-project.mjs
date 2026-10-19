@@ -22,9 +22,12 @@ const config = {
   ...envFile(new URL("../../.env.local", import.meta.url)),
   ...envFile(join(process.env.APPDATA || "", "com.lingocast.studio", ".env.local")),
 };
-const translationProvider = "mymemory";
 const apiKey = process.env.DEEPSEEK_API_KEY || config.DEEPSEEK_API_KEY;
-// The default subtitle workflow is key-free and never calls DeepSeek.
+// DeepSeek is the quality path and requires a key. Set VIDEO_SUBS_TRANSLATOR=mymemory
+// to opt back into the key-free fallback, or deepseek to force it.
+const translationProvider = process.env.VIDEO_SUBS_TRANSLATOR || (apiKey ? "deepseek" : "mymemory");
+if (!["deepseek", "mymemory"].includes(translationProvider)) throw new Error(`未知翻译通道：${translationProvider}`);
+if (translationProvider === "deepseek" && !apiKey) throw new Error("DeepSeek 翻译需要 DEEPSEEK_API_KEY");
 const apiBase = (process.env.DEEPSEEK_API_BASE || config.DEEPSEEK_API_BASE || "https://api.deepseek.com").replace(/\/$/, "");
 const model = process.env.DEEPSEEK_MODEL || config.DEEPSEEK_MODEL || "deepseek-chat";
 function parseList(value) {
@@ -481,6 +484,14 @@ function stripStop(value) {
   return value.trim().replace(/[.。．]+(["'”’）)\]】》〉」』]*)$/u, "$1").trim();
 }
 
+// Latin proper names are considerably narrower than CJK glyphs, so a raw
+// character count rejects readable bilingual cues such as
+// "如果球从Jarred Vanderbilt身后传给LeBron James". Count each Latin character
+// as roughly half a CJK glyph for the display-length gate.
+function displayLength(value) {
+  return [...String(value)].reduce((total, character) => total + (/^[\u0000-\u00ff]$/u.test(character) ? 0.55 : 1), 0);
+}
+
 function sqlText(value) {
   return `CAST(X'${Buffer.from(String(value), "utf8").toString("hex")}' AS TEXT)`;
 }
@@ -515,7 +526,7 @@ const qualityProblems = cues.flatMap((cue, index) => {
   if (!cue.sourceText.trim() || !cue.targetText.trim()) problems.push("缺少文本");
   if (duration > 9_500) problems.push(`时长 ${duration}ms`);
   if (cue.sourceText.length > 125) problems.push(`英文 ${cue.sourceText.length} 字符`);
-  if (cue.targetText.length > 46) problems.push(`中文 ${cue.targetText.length} 字符`);
+  if (displayLength(cue.targetText) > 46) problems.push(`中文宽度 ${displayLength(cue.targetText).toFixed(1)}`);
   return problems.length ? [`${index + 1}(${problems.join("、")})`] : [];
 });
 if (qualityProblems.length) throw new Error(`字幕显示块未通过长度质量门：${qualityProblems.join("；")}`);

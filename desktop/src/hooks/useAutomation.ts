@@ -5,7 +5,7 @@ import type { useStudio } from "./useStudio";
 import { automationCues, normalizeSubtitleStyle } from "../lib/automation";
 import { createProject, listProjects, loadProject, saveProject } from "../lib/repository";
 import { burnSubtitleVideo, downloadYoutubeVideo, isTauri, localVideoUrl, translateSubtitleCues } from "../lib/platform";
-import { buildBilingualCues, parseSrt, renderSrt } from "../lib/srt";
+import { buildBilingualCues, parseSrt, renderSrt, resegmentCues } from "../lib/srt";
 import { remapCuesToEditedVideo } from "../lib/videoEdits";
 import type { StudioProject } from "../types";
 
@@ -48,8 +48,15 @@ export function useAutomation(studio: ReturnType<typeof useStudio>, busy: boolea
       if (action === "import" || action === "youtube") {
         let videoPath = String(p.videoPath || "");
         let name = String(p.name || "Imported video");
-        let cues = p.cues === undefined ? parseSrt(String(p.srt || "")) : automationCues(p.cues);
-        let sourceContext: StudioProject["sourceContext"];
+        let cues = p.cues === undefined
+          ? resegmentCues(parseSrt(String(p.srt || ""))).filter((cue) => cue.sourceText.trim())
+          : automationCues(p.cues).filter((cue) => cue.sourceText.trim() || cue.targetText.trim());
+        let sourceContext: StudioProject["sourceContext"] = {
+          title: name,
+          channel: "",
+          description: "",
+          verifiedTerms: [],
+        };
         if (action === "youtube") {
           const downloaded = await downloadYoutubeVideo(String(p.url || ""), "", "", () => undefined);
           videoPath = downloaded.path;

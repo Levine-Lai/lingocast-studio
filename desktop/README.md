@@ -19,10 +19,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-portable.ps1
 
 面向个人使用的本地视频字幕工作台。桌面壳使用 Tauri 2，界面使用 React + TypeScript，项目和字幕数据保存在本机 SQLite 中。
 
-## 当前版本（0.9.2）
+## 当前版本（0.9.3）
 
 - 导入本地视频和 SRT 字幕
 - 粘贴单个 YouTube 视频网址，自动获取英文字幕并通过免密钥的 MyMemory 翻译接口生成中文字幕
+- 自动化：`node scripts/auto-subtitle.mjs --url "..."` 一条命令完成素材准备、DeepSeek 双语翻译、词级对轴、间隙校准并写入项目
 - 字幕编辑自动保存，切换项目不会丢失译文；旧的纯英文项目打开后会自动补齐并保存中文字幕
 - 自动把 YouTube 滚动字幕重组为完整、连贯且不重叠的语句
 - 视频预览、字幕叠加和时间轴定位

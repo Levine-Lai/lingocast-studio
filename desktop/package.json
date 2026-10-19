@@ -1,6 +1,6 @@
 {
   "name": "lingocast-studio-desktop",
-  "version": "0.9.2",
+  "version": "0.9.3",
   "private": true,
   "type": "module",
   "scripts": {
@@ -9,6 +9,7 @@
     "preview": "vite preview",
     "test": "vitest run",
     "agent": "node scripts/agent.mjs",
+    "auto": "node scripts/auto-subtitle.mjs",
     "tauri": "tauri",
     "release:portable": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-portable.ps1"
   },
