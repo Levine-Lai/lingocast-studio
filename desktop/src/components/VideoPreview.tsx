@@ -1,15 +1,19 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from "react";
 import { SubtitleStylePanel } from "./SubtitleStylePanel";
-import { normalizeSubtitleStyle, type SubtitleCue, type SubtitleStyle } from "../types";
+import { normalizeSubtitleStyle, type SubtitleCue, type SubtitleStyle, type VideoSegment } from "../types";
 import { clamp, formatClock } from "../lib/time";
-import { buildSubtitleRenderTimeline, renderSubtitleDataUrl } from "../lib/subtitleRaster";
+import { renderSubtitleGroupDataUrl, trackedSubtitleStyle } from "../lib/subtitleRaster";
+import { buildSubtitleRenderSegments, type TrackedSubtitleCue } from "../lib/subtitleTracks";
 import { normalizeSubtitleEditorText } from "../lib/srt";
+import { hasVideoCuts, nextPlayableSourceMs } from "../lib/videoEdits";
 
 type Props = {
   source?: string;
   projectName: string;
   cues: SubtitleCue[];
+  selectedCueId: string | null;
+  videoSegments: VideoSegment[];
   currentMs: number;
   playbackToggleSignal: number;
   subtitleStyle: SubtitleStyle;
@@ -33,8 +37,14 @@ type SubtitleDrag = {
 
 const MAX_SUBTITLE_RASTER_CACHE = 32;
 
-function subtitleRasterCacheKey(cue: SubtitleCue, style: SubtitleStyle) {
-  return JSON.stringify([cue.id, cue.sourceText, cue.targetText, style]);
+function subtitleRasterCacheKey(cues: TrackedSubtitleCue[], projectStyle: SubtitleStyle) {
+  return JSON.stringify(cues.map((item) => [
+    item.track,
+    item.cue.id,
+    item.cue.sourceText,
+    item.cue.targetText,
+    trackedSubtitleStyle(item, projectStyle),
+  ]));
 }
 
 async function decodeRaster(url: string) {
@@ -56,6 +66,8 @@ export function VideoPreview({
   source,
   projectName,
   cues,
+  selectedCueId,
+  videoSegments,
   currentMs,
   playbackToggleSignal,
   subtitleStyle,
@@ -85,16 +97,19 @@ export function VideoPreview({
   const [editingField, setEditingField] = useState<"sourceText" | "targetText" | null>(null);
   const [applyToAll, setApplyToAll] = useState(false);
   const [, bumpRasterRevision] = useState(0);
-  const renderTimeline = useMemo(() => buildSubtitleRenderTimeline(cues), [cues]);
-  const activeCue = renderTimeline.find((cue) => cue.startMs <= currentMs && currentMs < cue.endMs);
+  const renderTimeline = useMemo(() => buildSubtitleRenderSegments(cues), [cues]);
+  const activeSegment = renderTimeline.find((segment) => segment.startMs <= currentMs && currentMs < segment.endMs);
+  const activeTrackedCue = activeSegment?.cues.find(({ cue }) => cue.id === selectedCueId) ?? activeSegment?.cues[0];
+  const activeCue = activeTrackedCue?.cue;
   const effectiveStyle = useMemo(
-    () => normalizeSubtitleStyle({ ...subtitleStyle, ...activeCue?.subtitleStyle }),
-    [activeCue?.subtitleStyle, subtitleStyle],
+    () => activeTrackedCue ? trackedSubtitleStyle(activeTrackedCue, subtitleStyle) : normalizeSubtitleStyle(subtitleStyle),
+    [activeTrackedCue, subtitleStyle],
   );
   const [previewStyle, setPreviewStyle] = useState(effectiveStyle);
   const timelineEnd = Math.max(1, videoDurationMs, ...cues.map((cue) => cue.endMs));
-  const subtitleRasterKey = activeCue
-    ? subtitleRasterCacheKey(activeCue, previewStyle)
+  const sourceDurationMs = Math.max(timelineEnd, ...videoSegments.map((segment) => segment.endMs));
+  const subtitleRasterKey = activeSegment
+    ? subtitleRasterCacheKey(activeSegment.cues, subtitleStyle)
     : "";
   activeRasterKeyRef.current = subtitleRasterKey;
   const subtitleRasterUrl = rasterCacheRef.current.get(subtitleRasterKey) ?? "";
@@ -104,14 +119,14 @@ export function VideoPreview({
   }, [applyToAll, effectiveStyle, subtitleStyle]);
   useLayoutEffect(() => setEditingField(null), [activeCue?.id]);
 
-  const ensureSubtitleRaster = useCallback((cue: SubtitleCue, style: SubtitleStyle) => {
-    const key = subtitleRasterCacheKey(cue, style);
+  const ensureSubtitleRaster = useCallback((trackedCues: TrackedSubtitleCue[], style: SubtitleStyle) => {
+    const key = subtitleRasterCacheKey(trackedCues, style);
     const cached = rasterCacheRef.current.get(key);
     if (cached) return Promise.resolve(cached);
     const pending = rasterPendingRef.current.get(key);
     if (pending) return pending;
     const generation = rasterGenerationRef.current;
-    const task = renderSubtitleDataUrl(cue, style)
+    const task = renderSubtitleGroupDataUrl(trackedCues, style)
       .then(async (url) => {
         await decodeRaster(url);
         if (generation !== rasterGenerationRef.current) {
@@ -152,26 +167,22 @@ export function VideoPreview({
   }, [source]);
 
   useEffect(() => {
-    if (!activeCue || (!activeCue.sourceText.trim() && !activeCue.targetText.trim())) return;
-    void ensureSubtitleRaster(activeCue, previewStyle);
-  }, [activeCue, ensureSubtitleRaster, previewStyle]);
+    if (!activeSegment) return;
+    void ensureSubtitleRaster(activeSegment.cues, subtitleStyle);
+  }, [activeSegment, ensureSubtitleRaster, subtitleStyle]);
 
   useEffect(() => {
-    if (!activeCue) return;
-    const activeIndex = renderTimeline.findIndex((cue) => cue.id === activeCue.id);
+    if (!activeSegment) return;
+    const activeIndex = renderTimeline.indexOf(activeSegment);
     if (activeIndex < 0) return;
-    const nearbyCues = renderTimeline.slice(
+    const nearbySegments = renderTimeline.slice(
       Math.max(0, activeIndex - 2),
       Math.min(renderTimeline.length, activeIndex + 5),
     );
-    for (const cue of nearbyCues) {
-      if (!cue.sourceText.trim() && !cue.targetText.trim()) continue;
-      const style = cue.id === activeCue.id
-        ? previewStyle
-        : normalizeSubtitleStyle({ ...subtitleStyle, ...cue.subtitleStyle });
-      void ensureSubtitleRaster(cue, style);
+    for (const segment of nearbySegments) {
+      void ensureSubtitleRaster(segment.cues, subtitleStyle);
     }
-  }, [activeCue, ensureSubtitleRaster, previewStyle, renderTimeline, subtitleStyle]);
+  }, [activeSegment, ensureSubtitleRaster, renderTimeline, subtitleStyle]);
 
   useEffect(() => () => {
     if (singleClickTimer.current !== null) window.clearTimeout(singleClickTimer.current);
@@ -186,9 +197,20 @@ export function VideoPreview({
   const togglePlayback = useCallback(() => {
     const video = videoRef.current;
     if (!video) return;
-    if (video.paused) void video.play();
-    else video.pause();
-  }, []);
+    if (!video.paused) {
+      video.pause();
+      return;
+    }
+    if (hasVideoCuts(videoSegments)) {
+      const playableMs = nextPlayableSourceMs(videoSegments, sourceDurationMs, video.currentTime * 1000);
+      if (playableMs === null) return;
+      if (Math.abs(playableMs - video.currentTime * 1000) > 5) {
+        video.currentTime = playableMs / 1000;
+        onTimeChange(playableMs);
+      }
+    }
+    void video.play();
+  }, [onTimeChange, sourceDurationMs, videoSegments]);
 
   useEffect(() => {
     if (lastPlaybackSignal.current === playbackToggleSignal) return;
@@ -205,13 +227,22 @@ export function VideoPreview({
       if (!video || video.paused) return;
       if (timestamp - lastUpdate >= 28) {
         lastUpdate = timestamp;
-        onTimeChange(video.currentTime * 1000);
+        const sourceMs = video.currentTime * 1000;
+        const playableMs = hasVideoCuts(videoSegments)
+          ? nextPlayableSourceMs(videoSegments, sourceDurationMs, sourceMs)
+          : sourceMs;
+        if (playableMs === null) {
+          video.pause();
+          return;
+        }
+        if (playableMs > sourceMs + 5) video.currentTime = playableMs / 1000;
+        onTimeChange(playableMs);
       }
       frame = window.requestAnimationFrame(update);
     };
     frame = window.requestAnimationFrame(update);
     return () => window.cancelAnimationFrame(frame);
-  }, [onTimeChange, playing]);
+  }, [onTimeChange, playing, sourceDurationMs, videoSegments]);
 
   useEffect(() => {
     const stage = stageRef.current;
@@ -352,7 +383,20 @@ export function VideoPreview({
               src={source}
               tabIndex={0}
               aria-label="视频画面"
-              onTimeUpdate={(event) => onTimeChange(event.currentTarget.currentTime * 1000)}
+              onTimeUpdate={(event) => {
+                const sourceMs = event.currentTarget.currentTime * 1000;
+                if (!playing || !hasVideoCuts(videoSegments)) {
+                  onTimeChange(sourceMs);
+                  return;
+                }
+                const playableMs = nextPlayableSourceMs(videoSegments, sourceDurationMs, sourceMs);
+                if (playableMs === null) {
+                  event.currentTarget.pause();
+                  return;
+                }
+                if (playableMs > sourceMs + 5) event.currentTarget.currentTime = playableMs / 1000;
+                onTimeChange(playableMs);
+              }}
               onLoadedMetadata={(event) => {
                 const duration = event.currentTarget.duration * 1000;
                 const { videoWidth, videoHeight } = event.currentTarget;

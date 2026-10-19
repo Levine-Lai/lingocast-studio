@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent, PointerEvent as ReactPointerEvent } from "react";
-import type { SubtitleCue } from "../types";
+import type { SubtitleCue, VideoSegment } from "../types";
 import { clamp, formatClock } from "../lib/time";
+import { assignSubtitleTracks, type SubtitleTrack } from "../lib/subtitleTracks";
+import { normalizeVideoSegments } from "../lib/videoEdits";
 
 type Props = {
   cues: SubtitleCue[];
@@ -9,9 +11,12 @@ type Props = {
   currentMs: number;
   playing: boolean;
   selectedCueId: string | null;
+  videoSegments: VideoSegment[];
+  selectedVideoSegmentId: string | null;
   onSeek: (milliseconds: number) => void;
   onSelect: (cueId: string) => void;
   onUpdate: (cueId: string, patch: Partial<SubtitleCue>, options?: { historyGroup?: string }) => void;
+  onSelectVideoSegment: (segmentId: string) => void;
 };
 
 type DragMode = "move" | "resize-start" | "resize-end";
@@ -45,7 +50,7 @@ function tickStep(pixelsPerSecond: number) {
   return 30_000;
 }
 
-export function Timeline({ cues, durationMs, currentMs, playing, selectedCueId, onSeek, onSelect, onUpdate }: Props) {
+export function Timeline({ cues, durationMs, currentMs, playing, selectedCueId, videoSegments, selectedVideoSegmentId, onSeek, onSelect, onUpdate, onSelectVideoSegment }: Props) {
   const [pixelsPerSecond, setPixelsPerSecond] = useState(70);
   const dragRef = useRef<DragState | null>(null);
   const scrubRef = useRef<ScrubState | null>(null);
@@ -325,41 +330,72 @@ export function Timeline({ cues, durationMs, currentMs, playing, selectedCueId, 
     }
   }
 
-  const cueClips = useMemo(() => cues.map((cue) => {
-    const left = (cue.startMs / 1000) * pixelsPerSecond;
-    const width = Math.max(18, ((cue.endMs - cue.startMs) / 1000) * pixelsPerSecond);
+  const cueClips = useMemo(() => {
+    const tracked = assignSubtitleTracks(cues);
+    return ([0, 1] as SubtitleTrack[]).map((track) => tracked
+      .filter((item) => item.track === track)
+      .map(({ cue }) => {
+        const left = (cue.startMs / 1000) * pixelsPerSecond;
+        const width = Math.max(18, ((cue.endMs - cue.startMs) / 1000) * pixelsPerSecond);
+        return (
+          <div
+            key={cue.id}
+            className={cue.id === selectedCueId ? "cue-clip active" : "cue-clip"}
+            style={{ left: `${left}px`, width: `${width}px` }}
+            role="button"
+            tabIndex={0}
+            aria-label={`${track === 0 ? "主字幕" : "注释"}，${formatClock(cue.startMs, true)} 到 ${formatClock(cue.endMs, true)}，${cue.sourceText || "空字幕"}`}
+            title="拖动片段移动时间；拖动两侧手柄调整字幕长度"
+            onPointerDown={(event) => startDrag(event, cue, "move")}
+            onKeyDown={(event) => moveCueWithKeyboard(event, cue)}
+          >
+            <span
+              className="clip-handle start"
+              role="separator"
+              tabIndex={0}
+              aria-label="调整字幕开始时间"
+              onPointerDown={(event) => startDrag(event, cue, "resize-start")}
+              onKeyDown={(event) => resizeWithKeyboard(event, cue, "start")}
+            />
+            <span className="clip-copy"><b>{cue.sourceText || "空字幕"}</b>{cue.targetText ? <small>{cue.targetText}</small> : null}</span>
+            <span
+              className="clip-handle end"
+              role="separator"
+              tabIndex={0}
+              aria-label="调整字幕结束时间"
+              onPointerDown={(event) => startDrag(event, cue, "resize-end")}
+              onKeyDown={(event) => resizeWithKeyboard(event, cue, "end")}
+            />
+          </div>
+        );
+      }));
+  }, [cues, onSeek, onSelect, onUpdate, pixelsPerSecond, selectedCueId]);
+
+  const videoClips = useMemo(() => normalizeVideoSegments(videoSegments, durationMs).filter((segment) => !segment.removed).map((segment, index) => {
+    const left = (segment.startMs / 1000) * pixelsPerSecond;
+    const width = Math.max(18, ((segment.endMs - segment.startMs) / 1000) * pixelsPerSecond);
+    const classes = ["video-segment", segment.id === selectedVideoSegmentId ? "selected" : ""]
+      .filter(Boolean)
+      .join(" ");
     return (
-      <div
-        key={cue.id}
-        className={cue.id === selectedCueId ? "cue-clip active" : "cue-clip"}
+      <button
+        key={segment.id}
+        type="button"
+        className={classes}
         style={{ left: `${left}px`, width: `${width}px` }}
-        role="button"
-        tabIndex={0}
-        aria-label={`${formatClock(cue.startMs, true)} 到 ${formatClock(cue.endMs, true)}，${cue.sourceText || "空字幕"}`}
-        title="拖动片段移动时间；拖动两侧手柄调整字幕长度"
-        onPointerDown={(event) => startDrag(event, cue, "move")}
-        onKeyDown={(event) => moveCueWithKeyboard(event, cue)}
+        title={`视频片段 ${index + 1}：${formatClock(segment.startMs, true)} – ${formatClock(segment.endMs, true)}`}
+        aria-label={`视频片段 ${index + 1}`}
+        onPointerDown={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          onSelectVideoSegment(segment.id);
+          onSeek(segment.startMs);
+        }}
       >
-        <span
-          className="clip-handle start"
-          role="separator"
-          tabIndex={0}
-          aria-label="调整字幕开始时间"
-          onPointerDown={(event) => startDrag(event, cue, "resize-start")}
-          onKeyDown={(event) => resizeWithKeyboard(event, cue, "start")}
-        />
-        <span className="clip-copy"><b>{cue.sourceText || "空字幕"}</b>{cue.targetText ? <small>{cue.targetText}</small> : null}</span>
-        <span
-          className="clip-handle end"
-          role="separator"
-          tabIndex={0}
-          aria-label="调整字幕结束时间"
-          onPointerDown={(event) => startDrag(event, cue, "resize-end")}
-          onKeyDown={(event) => resizeWithKeyboard(event, cue, "end")}
-        />
-      </div>
+        <span>{`片段 ${index + 1}`}</span>
+      </button>
     );
-  }), [cues, onSeek, onSelect, onUpdate, pixelsPerSecond, selectedCueId]);
+  }), [durationMs, onSeek, onSelectVideoSegment, pixelsPerSecond, selectedVideoSegmentId, videoSegments]);
 
   return (
     <section className="timeline-panel" aria-label="字幕时间轴">
@@ -397,10 +433,20 @@ export function Timeline({ cues, durationMs, currentMs, playing, selectedCueId, 
               </span>
             ))}
           </div>
+          <div className="video-lane">
+            <span className="lane-label video-label">视频</span>
+            {videoClips}
+          </div>
           <div className="waveform-lane" aria-hidden="true" />
           <div className="subtitle-lane">
-            <span className="lane-label">字幕</span>
-            {cueClips}
+            <div className="subtitle-track primary-track">
+              <span className="lane-label">主字幕</span>
+              {cueClips[0]}
+            </div>
+            <div className="subtitle-track note-track">
+              <span className="lane-label">注释</span>
+              {cueClips[1]}
+            </div>
           </div>
           <div className="playhead" style={{ transform: `translate3d(${playheadLeft}px, 0, 0)` }} aria-hidden="true"><span /></div>
         </div>

@@ -1,6 +1,6 @@
 # LingoCast Studio
 
-LingoCast Studio 是一款本地优先的 Windows 双语视频字幕编辑器。它可以从本地视频或 YouTube 导入素材，整理英文字幕、通过 DeepSeek 生成口语化中文字幕，在时间轴中编辑和对齐字幕，并把预览样式真正烧录进 MP4。
+LingoCast Studio 是一款本地优先的 Windows 双语视频字幕编辑器。它可以从本地视频或 YouTube 导入素材，整理英文字幕、通过内置 MyMemory 接口生成中文字幕，在时间轴中编辑和对齐字幕，并把预览样式真正烧录进 MP4。
 
 项目采用 [Tauri 2](https://tauri.app/) + React + TypeScript，字幕项目保存在本机 SQLite 数据库中。视频、字幕数据库、Cookie 和 API Key 不会包含在本仓库中。
 
@@ -21,15 +21,20 @@ LingoCast Studio 是一款本地优先的 Windows 双语视频字幕编辑器。
 - Rust stable 工具链
 - [FFmpeg](https://ffmpeg.org/) 和 [yt-dlp](https://github.com/yt-dlp/yt-dlp) 可从 `PATH` 找到
 - Microsoft Edge WebView2 Runtime（Windows 11 通常已自带）
-- DeepSeek API Key（仅翻译功能需要）
+- 翻译使用 MyMemory 在线接口，无需 API Key
 
-把 `.env.example` 复制到以下任一位置并填写 Key：
+## Agent 与自动化
 
-```text
-%APPDATA%\com.lingocast.studio\.env.local
+当前版本 **0.9.2**。任何能够执行 Node 命令的本地 agent 都可通过 [自动化接口](desktop/AUTOMATION.md) 操作项目、字幕、样式、视频剪辑、翻译与导出。
+
+```powershell
+cd desktop
+node scripts/agent.mjs --launch
+node scripts/agent.mjs status
+node scripts/agent.mjs list
 ```
 
-也可以在开发时放置于仓库根目录的 `.env.local`。这些文件已被 Git 忽略。
+首次使用先发布便携版。接口默认关闭，CLI 启动时启用；JSON 请求及完整操作表见接口文档。
 
 ## 本地开发
 
@@ -63,7 +68,7 @@ npm run release:portable
 
 1. 运行前端与 Rust 测试
 2. 构建 Windows 便携版
-3. 把便携 EXE 上传到该次 Actions 运行的 Artifacts，保留 90 天
+3. 把便携 EXE、agent CLI、哈希清单与接口说明上传到该次 Actions 运行的 Artifacts，保留 90 天
 
 普通更新不要求修改版本号，也不会自动创建 GitHub Release。源码提交会永久保存在 GitHub；另一台 Windows 电脑可以从最新一次成功的 Actions 运行中下载便携 EXE，或者克隆源码自行构建。正式对外发布版本时，再手动创建 Release 即可。
 
@@ -71,7 +76,7 @@ npm run release:portable
 
 - 不要提交 `.env.local`、Cookie、SQLite 数据库或用户视频
 - YouTube 登录凭证仅保存在本机应用数据目录
-- DeepSeek API Key 只由本地后端读取，不应写入前端源码
+- 可选服务 Key 只由本地后端读取，不应写入前端源码
 - GitHub Actions 构建产物只包含编译后的应用，不包含个人素材
 
 ## License

@@ -1,6 +1,7 @@
 import type { DownloadedSubtitleTrack, StudioProject, SubtitleCue, VideoSourceContext } from "../types";
 import { normalizeSubtitleEditorText, parseSrt, renderSrt, sanitizeSubtitleText } from "./srt";
 import { renderBurnOverlays } from "./subtitleRaster";
+import { editedVideoDurationMs, hasVideoCuts, keptVideoSegments, remapCuesToEditedVideo } from "./videoEdits";
 
 declare global {
   interface Window {
@@ -106,7 +107,7 @@ export async function pickYoutubeCookieFile() {
 }
 
 export async function translateSubtitleCues(cues: SubtitleCue[], sourceContext?: VideoSourceContext) {
-  if (!isTauri()) throw new Error("DeepSeek 翻译只能在桌面软件中运行");
+  if (!isTauri()) throw new Error("字幕翻译只能在桌面软件中运行");
   const { invoke } = await import("@tauri-apps/api/core");
   const translated = await invoke<Array<{ id: string; sourceText: string; targetText: string; speaker: string }>>("translate_subtitles", {
     cues: cues.map((cue) => ({ id: cue.id, sourceText: cue.sourceText })),
@@ -198,6 +199,7 @@ export async function exportSubtitleFile(name: string, cues: SubtitleCue[]) {
 export async function burnSubtitleVideo(
   project: StudioProject,
   onProgress: (percent: number) => void,
+  destination?: string,
 ) {
   if (!isTauri()) throw new Error("视频烧录只能在桌面软件中运行");
   const [{ save }, { invoke }, { listen }] = await Promise.all([
@@ -206,16 +208,23 @@ export async function burnSubtitleVideo(
     import("@tauri-apps/api/event"),
   ]);
   const directory = await invoke<string>("ensure_export_directory", { projectName: project.name });
-  const outputPath = await save({
+  const outputPath = destination || await save({
     defaultPath: exportPath(directory, `${safeExportFilename(project.name)}.burned.mp4`),
     filters: [{ name: "MP4 视频", extensions: ["mp4"] }],
   });
   if (!outputPath) return null;
-  const durationMs = resolveBurnDurationMs(project.cues, project.durationMs);
+  const sourceDurationMs = resolveBurnDurationMs(project.cues, project.durationMs);
+  const hasCuts = hasVideoCuts(project.videoSegments);
+  const exportCues = hasCuts
+    ? remapCuesToEditedVideo(project.cues, project.videoSegments, sourceDurationMs)
+    : project.cues;
+  const durationMs = hasCuts
+    ? editedVideoDurationMs(project.videoSegments, sourceDurationMs)
+    : sourceDurationMs;
   if (!Number.isFinite(durationMs) || durationMs <= 0) {
     throw new Error("无法读取视频时长，请等待视频加载完成或重新导入可播放的视频后再烧录");
   }
-  const { overlayBundleBase64 } = await renderBurnOverlays(project.cues, project.subtitleStyle, onProgress);
+  const { overlayBundleBase64 } = await renderBurnOverlays(exportCues, project.subtitleStyle, onProgress);
   const jobId = crypto.randomUUID();
   const unlisten = await listen<{ jobId: string; percent: number }>("video-burn-progress", (event) => {
     if (event.payload.jobId === jobId) onProgress(10 + event.payload.percent * 0.9);
@@ -228,7 +237,8 @@ export async function burnSubtitleVideo(
       durationMs,
       jobId,
       overlayBundleBase64,
-      cues: project.cues.map((cue) => ({
+      videoSegments: hasCuts ? keptVideoSegments(project.videoSegments, sourceDurationMs) : [],
+      cues: exportCues.map((cue) => ({
         startMs: cue.startMs,
         endMs: cue.endMs,
         sourceText: normalizeSubtitleEditorText(cue.sourceText),

@@ -81,7 +81,7 @@ export function YoutubeImportDialog({ download, error, onClose, onSubmit }: Prop
         <button className="dialog-close" type="button" onClick={onClose} disabled={download.active} aria-label="关闭">×</button>
         <span className="youtube-mark" aria-hidden="true">▶</span>
         <h2 id={titleId}>从 YouTube 导入视频</h2>
-        <p id={descriptionId}>粘贴单个视频链接。应用会下载视频、整理英文断句，并通过 DeepSeek 生成中文字幕。</p>
+        <p id={descriptionId}>粘贴单个视频链接。应用会下载视频、整理英文断句，并生成中文字幕。</p>
 
         <form onSubmit={(event) => void submit(event)}>
           <label htmlFor="youtube-url">YouTube 视频网址</label>
@@ -150,7 +150,7 @@ export function YoutubeImportDialog({ download, error, onClose, onSubmit }: Prop
             </button>
           </div>
         </form>
-        <small className="dialog-note">DeepSeek 翻译使用本机配置；暂不支持播放列表。</small>
+        <small className="dialog-note">中文字幕使用免密钥翻译服务；暂不支持播放列表。</small>
       </section>
     </div>
   );

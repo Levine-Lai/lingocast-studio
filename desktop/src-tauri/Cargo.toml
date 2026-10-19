@@ -1,6 +1,6 @@
 [package]
 name = "lingocast-studio"
-version = "0.8.8"
+version = "0.9.2"
 description = "Local-first subtitle editing and rendering studio"
 authors = ["LingoCast"]
 edition = "2021"

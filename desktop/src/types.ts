@@ -1,4 +1,5 @@
 export type CueStatus = "draft" | "reviewed" | "approved";
+export type CueKind = "subtitle" | "note";
 
 export type SubtitleCue = {
   id: string;
@@ -9,7 +10,19 @@ export type SubtitleCue = {
   sourceText: string;
   targetText: string;
   status: CueStatus;
+  kind?: CueKind;
   subtitleStyle?: Partial<SubtitleStyle>;
+};
+
+export const DEFAULT_NOTE_SUBTITLE_STYLE: Partial<SubtitleStyle> = {
+  positionX: 50,
+  positionY: 80,
+  sourceColor: "#C2FFF8",
+  targetColor: "#C2FFF8",
+  sourceFontSize: 40,
+  targetFontSize: 40,
+  sourceFontFamily: "Microsoft YaHei",
+  targetFontFamily: "Microsoft YaHei",
 };
 
 export type SubtitleStyle = {
@@ -109,9 +122,17 @@ export type StudioProject = {
   createdAt: string;
   updatedAt: string;
   burnedAt?: string;
+  videoSegments: VideoSegment[];
   subtitleStyle: SubtitleStyle;
   sourceContext?: VideoSourceContext;
   cues: SubtitleCue[];
+};
+
+export type VideoSegment = {
+  id: string;
+  startMs: number;
+  endMs: number;
+  removed: boolean;
 };
 
 export type VideoSourceContext = {

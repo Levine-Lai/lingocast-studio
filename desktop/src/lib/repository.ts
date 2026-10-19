@@ -9,6 +9,7 @@ type ProjectRow = {
   created_at: string;
   updated_at: string;
   burned_at?: string | null;
+  video_segments?: string;
   subtitle_style?: string;
   source_context?: string;
   cue_count?: number;
@@ -23,6 +24,7 @@ type CueRow = {
   source_text: string;
   target_text: string;
   status: SubtitleCue["status"];
+  cue_kind?: SubtitleCue["kind"];
   subtitle_style?: string;
 };
 
@@ -41,8 +43,13 @@ function readBrowserProjects(): StudioProject[] {
     const projects = JSON.parse(localStorage.getItem(BROWSER_STORAGE_KEY) || "[]") as StudioProject[];
     return projects.map((project) => ({
       ...project,
+      videoSegments: Array.isArray(project.videoSegments) ? project.videoSegments : [],
       subtitleStyle: normalizeSubtitleStyle(project.subtitleStyle),
-      cues: project.cues.map((cue) => ({ ...cue, subtitleStyle: normalizeSubtitleStyleOverride(cue.subtitleStyle) })),
+      cues: project.cues.map((cue) => ({
+        ...cue,
+        kind: cue.kind === "note" ? "note" : "subtitle",
+        subtitleStyle: normalizeSubtitleStyleOverride(cue.subtitleStyle),
+      })),
     }));
   } catch {
     return [];
@@ -76,6 +83,13 @@ function mapProject(row: ProjectRow, cues: SubtitleCue[]): StudioProject {
   } catch {
     sourceContext = undefined;
   }
+  let videoSegments: StudioProject["videoSegments"] = [];
+  try {
+    const parsed = JSON.parse(row.video_segments || "[]");
+    if (Array.isArray(parsed)) videoSegments = parsed;
+  } catch {
+    videoSegments = [];
+  }
   return {
     id: row.id,
     name: row.name,
@@ -84,6 +98,7 @@ function mapProject(row: ProjectRow, cues: SubtitleCue[]): StudioProject {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     burnedAt: row.burned_at || undefined,
+    videoSegments,
     subtitleStyle: normalizeSubtitleStyle(storedStyle as Partial<StudioProject["subtitleStyle"]>),
     sourceContext,
     cues,
@@ -152,6 +167,7 @@ export async function loadProject(projectId: string): Promise<StudioProject | nu
     sourceText: cue.source_text,
     targetText: cue.target_text,
     status: cue.status,
+    kind: cue.cue_kind === "note" ? "note" : "subtitle",
     subtitleStyle: normalizeSubtitleStyleOverride(storedStyle as Partial<StudioProject["subtitleStyle"]>),
   };
   }));
@@ -168,6 +184,7 @@ export async function createProject(input: { name: string; videoPath: string; vi
     createdAt: now,
     updatedAt: now,
     burnedAt: undefined,
+    videoSegments: [],
     subtitleStyle: { ...DEFAULT_SUBTITLE_STYLE },
     sourceContext: input.sourceContext,
     cues: [],
@@ -189,16 +206,17 @@ export async function saveProject(project: StudioProject) {
 
   const db = await getDatabase();
   await db.execute(
-    `INSERT INTO projects (id, name, video_path, duration_ms, created_at, updated_at, subtitle_style, burned_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+    `INSERT INTO projects (id, name, video_path, duration_ms, created_at, updated_at, subtitle_style, burned_at, video_segments)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
      ON CONFLICT(id) DO UPDATE SET
        name = excluded.name,
        video_path = excluded.video_path,
        duration_ms = excluded.duration_ms,
        updated_at = excluded.updated_at,
        subtitle_style = excluded.subtitle_style,
-       burned_at = excluded.burned_at`,
-    [next.id, next.name, next.videoPath, next.durationMs, next.createdAt, next.updatedAt, JSON.stringify(next.subtitleStyle), next.burnedAt ?? null],
+       burned_at = excluded.burned_at,
+       video_segments = excluded.video_segments`,
+    [next.id, next.name, next.videoPath, next.durationMs, next.createdAt, next.updatedAt, JSON.stringify(next.subtitleStyle), next.burnedAt ?? null, JSON.stringify(next.videoSegments ?? [])],
   );
   await db.execute(
     `INSERT INTO project_contexts (project_id, source_context)
@@ -210,8 +228,8 @@ export async function saveProject(project: StudioProject) {
   for (const cue of next.cues) {
     await db.execute(
       `INSERT INTO cues
-        (id, project_id, position, start_ms, end_ms, speaker, source_text, target_text, status, updated_at, subtitle_style)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        (id, project_id, position, start_ms, end_ms, speaker, source_text, target_text, status, updated_at, subtitle_style, cue_kind)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
        ON CONFLICT(id) DO UPDATE SET
          position = excluded.position,
          start_ms = excluded.start_ms,
@@ -221,7 +239,8 @@ export async function saveProject(project: StudioProject) {
          target_text = excluded.target_text,
          status = excluded.status,
          updated_at = excluded.updated_at,
-         subtitle_style = excluded.subtitle_style`,
+         subtitle_style = excluded.subtitle_style,
+         cue_kind = excluded.cue_kind`,
       [
         cue.id,
         next.id,
@@ -234,6 +253,7 @@ export async function saveProject(project: StudioProject) {
         cue.status,
         next.updatedAt,
         JSON.stringify(cue.subtitleStyle ?? {}),
+        cue.kind === "note" ? "note" : "subtitle",
       ],
     );
   }

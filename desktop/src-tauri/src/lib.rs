@@ -1,3 +1,4 @@
+mod automation;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use flate2::read::GzDecoder;
 use serde::{Deserialize, Serialize};
@@ -172,6 +173,13 @@ struct BurnOverlayInput {
     start_ms: f64,
     end_ms: f64,
     png_bytes: Vec<u8>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BurnSegmentInput {
+    start_ms: f64,
+    end_ms: f64,
 }
 
 #[derive(Clone, Deserialize)]
@@ -394,6 +402,49 @@ struct DeepSeekTranslationItem {
     speaker: Option<String>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MyMemoryResponse {
+    response_data: MyMemoryResponseData,
+    response_status: u16,
+    #[serde(default)]
+    quota_finished: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MyMemoryResponseData {
+    translated_text: String,
+}
+
+async fn translate_with_mymemory(
+    client: &reqwest::Client,
+    source: &str,
+) -> Result<String, String> {
+    let response = client
+        .get("https://api.mymemory.translated.net/get")
+        .query(&[("q", source), ("langpair", "en|zh-CN"), ("mt", "1")])
+        .send()
+        .await
+        .map_err(|error| format!("MyMemory 翻译请求失败：{error}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("MyMemory 翻译返回 HTTP {status}"));
+    }
+    let body = response
+        .json::<MyMemoryResponse>()
+        .await
+        .map_err(|error| format!("无法读取 MyMemory 翻译响应：{error}"))?;
+    if body.response_status != 200 || body.quota_finished {
+        return Err("MyMemory 免费翻译额度暂不可用".to_string());
+    }
+    let translated = body.response_data.translated_text.trim();
+    if translated.is_empty() {
+        return Err("MyMemory 没有返回翻译内容".to_string());
+    }
+    Ok(translated.trim_end_matches(['.', '。', '．']).to_string())
+}
+
 #[derive(Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SubtitleTermReviewPayload {
@@ -490,7 +541,11 @@ fn decode_overlay_bundle(encoded: &str) -> Result<(Vec<BurnOverlayInput>, Vec<u8
         let start_ms = read_bundle_f64(&mut reader)?;
         let end_ms = read_bundle_f64(&mut reader)?;
         let image_len = read_bundle_u32(&mut reader)?;
-        if !start_ms.is_finite() || !end_ms.is_finite() || image_len == 0 || image_len > MAX_IMAGE_BYTES {
+        if !start_ms.is_finite()
+            || !end_ms.is_finite()
+            || image_len == 0
+            || image_len > MAX_IMAGE_BYTES
+        {
             return Err("字幕图层数据无效".to_string());
         }
         let mut png_bytes = vec![0_u8; image_len as usize];
@@ -536,6 +591,107 @@ async fn probe_video_duration_ms(video_path: &str) -> Result<f64, String> {
         .filter(|value| value.is_finite() && *value > 0.0)
         .ok_or_else(|| "视频时长无效，请重新导入完整视频".to_string())?;
     Ok(seconds * 1_000.0)
+}
+
+async fn probe_video_has_audio(video_path: &str) -> Result<bool, String> {
+    let mut command = Command::new("ffprobe");
+    command.args([
+        "-v",
+        "error",
+        "-select_streams",
+        "a:0",
+        "-show_entries",
+        "stream=index",
+        "-of",
+        "csv=p=0",
+        video_path,
+    ]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.as_std_mut().creation_flags(0x08000000);
+    }
+    let output = command
+        .output()
+        .await
+        .map_err(|error| format!("无法检查视频音轨：{error}"))?;
+    if !output.status.success() {
+        return Err("FFprobe 无法检查视频音轨".to_string());
+    }
+    Ok(!String::from_utf8_lossy(&output.stdout).trim().is_empty())
+}
+
+fn build_video_cut_filter(
+    segments: &[BurnSegmentInput],
+    has_audio: bool,
+) -> (String, String, Option<String>) {
+    let mut filters = Vec::new();
+    let count = segments.len();
+    if count > 1 {
+        filters.push(format!(
+            "[0:v]split={count}{}",
+            (0..count)
+                .map(|index| format!("[vsrc{index}]"))
+                .collect::<String>()
+        ));
+        if has_audio {
+            filters.push(format!(
+                "[0:a]asplit={count}{}",
+                (0..count)
+                    .map(|index| format!("[asrc{index}]"))
+                    .collect::<String>()
+            ));
+        }
+    }
+    for (index, segment) in segments.iter().enumerate() {
+        let start = segment.start_ms / 1000.0;
+        let end = segment.end_ms / 1000.0;
+        let video_source = if count > 1 {
+            format!("vsrc{index}")
+        } else {
+            "0:v".to_string()
+        };
+        filters.push(format!(
+            "[{video_source}]trim=start={start:.6}:end={end:.6},setpts=PTS-STARTPTS[v{index}]"
+        ));
+        if has_audio {
+            let audio_source = if count > 1 {
+                format!("asrc{index}")
+            } else {
+                "0:a".to_string()
+            };
+            filters.push(format!(
+                "[{audio_source}]atrim=start={start:.6}:end={end:.6},asetpts=PTS-STARTPTS[a{index}]"
+            ));
+        }
+    }
+    if count == 1 {
+        return (
+            filters.join(";"),
+            "v0".to_string(),
+            has_audio.then(|| "a0".to_string()),
+        );
+    }
+    let inputs = (0..count)
+        .map(|index| {
+            if has_audio {
+                format!("[v{index}][a{index}]")
+            } else {
+                format!("[v{index}]")
+            }
+        })
+        .collect::<String>();
+    if has_audio {
+        filters.push(format!("{inputs}concat=n={count}:v=1:a=1[cutv][cuta]"));
+        (
+            filters.join(";"),
+            "cutv".to_string(),
+            Some("cuta".to_string()),
+        )
+    } else {
+        filters.push(format!("{inputs}concat=n={count}:v=1:a=0[cutv]"));
+        (filters.join(";"), "cutv".to_string(), None)
+    }
 }
 
 async fn find_downloaded_video(directory: &Path, video_id: &str) -> Option<std::path::PathBuf> {
@@ -732,6 +888,14 @@ async fn review_youtube_subtitle_context(
     cues: Vec<TranslationCueInput>,
     source_context: VideoSourceContext,
 ) -> Result<ReviewedSubtitleContext, String> {
+    // The key-free provider does not offer a contextual term-review endpoint.
+    // Preserve researched context and let the deterministic import pipeline
+    // apply its verified terms and corrections.
+    return Ok(ReviewedSubtitleContext {
+        source_context: source_context.clone(),
+        corrections: Vec::new(),
+    });
+    #[allow(unreachable_code)]
     if cues.is_empty() {
         return Ok(ReviewedSubtitleContext {
             source_context,
@@ -900,6 +1064,23 @@ async fn translate_subtitles(
     if cues.is_empty() {
         return Ok(Vec::new());
     }
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(45))
+        .user_agent("LingoCast-Studio/0.9")
+        .build()
+        .map_err(|error| format!("无法初始化 MyMemory 翻译：{error}"))?;
+    let mut result = Vec::with_capacity(cues.len());
+    for cue in cues.iter() {
+        let target_text = translate_with_mymemory(&client, &cue.source_text).await?;
+        result.push(TranslatedSubtitleCue {
+            id: cue.id.clone(),
+            source_text: cue.source_text.clone(),
+            target_text,
+            speaker: String::new(),
+        });
+    }
+    return Ok(result);
+    #[allow(unreachable_code)]
     let config = deepseek_config(&app)?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(180))
@@ -1601,13 +1782,16 @@ async fn write_overlay_timeline(
 
 fn youtube_id_from_video_path(video_path: &str) -> Option<String> {
     let stem = Path::new(video_path).file_stem()?.to_string_lossy();
-    let open = stem.rfind('[')?;
-    let candidate = stem.get(open + 1..)?.strip_suffix(']')?;
-    (candidate.len() == 11
-        && candidate.chars().all(|character| {
-            character.is_ascii_alphanumeric() || character == '-' || character == '_'
-        }))
-    .then(|| candidate.to_string())
+    stem.match_indices('[').rev().find_map(|(open, _)| {
+        let remainder = stem.get(open + 1..)?;
+        let close = remainder.find(']')?;
+        let candidate = remainder.get(..close)?;
+        (candidate.len() == 11
+            && candidate.chars().all(|character| {
+                character.is_ascii_alphanumeric() || character == '-' || character == '_'
+            }))
+        .then(|| candidate.to_string())
+    })
 }
 
 async fn find_local_youtube_cover(video_path: &str, video_id: &str) -> Option<PathBuf> {
@@ -1629,7 +1813,7 @@ async fn find_local_youtube_cover(video_path: &str, video_id: &str) -> Option<Pa
             .file_stem()
             .and_then(|value| value.to_str())
             .unwrap_or_default();
-        if stem == video_stem || stem.contains(&format!("[{video_id}]")) {
+        if stem == video_stem || stem.contains(&format!("[{video_id}]")) || stem.contains(video_id) {
             let score = match extension.as_str() {
                 "jpg" | "jpeg" => 0,
                 _ => 1,
@@ -1741,6 +1925,7 @@ async fn run_burn_video<F>(
     video_path: String,
     output_path: String,
     cues: Vec<BurnCueInput>,
+    video_segments: Vec<BurnSegmentInput>,
     overlays: Vec<BurnOverlayInput>,
     blank_png: Vec<u8>,
     style: BurnStyleInput,
@@ -1754,15 +1939,6 @@ where
     if !input.is_file() {
         return Err("找不到原视频文件，请重新导入视频".to_string());
     }
-    if cues.is_empty() {
-        return Err("当前项目没有可烧录的字幕".to_string());
-    }
-    if !cues
-        .iter()
-        .any(|cue| !cue.source_text.trim().is_empty() || !cue.target_text.trim().is_empty())
-    {
-        return Err("当前项目没有可烧录的有效字幕".to_string());
-    }
     if input == Path::new(&output_path) {
         return Err("导出路径不能覆盖原视频，请选择新的文件名".to_string());
     }
@@ -1771,7 +1947,34 @@ where
     }
     // Frontend metadata can still be pending or stale. The media file itself
     // is the source of truth for timeline clipping and progress reporting.
-    let duration_ms = probe_video_duration_ms(&video_path).await?;
+    let source_duration_ms = probe_video_duration_ms(&video_path).await?;
+    let cut_segments = video_segments
+        .into_iter()
+        .filter_map(|segment| {
+            let start_ms = segment.start_ms.max(0.0).min(source_duration_ms);
+            let end_ms = segment.end_ms.max(0.0).min(source_duration_ms);
+            (start_ms.is_finite() && end_ms.is_finite() && end_ms - start_ms >= 10.0)
+                .then_some(BurnSegmentInput { start_ms, end_ms })
+        })
+        .collect::<Vec<_>>();
+    if !cut_segments.is_empty()
+        && cut_segments
+            .windows(2)
+            .any(|pair| pair[0].end_ms > pair[1].start_ms)
+    {
+        return Err("视频剪辑片段存在重叠，请重新分割后再导出".to_string());
+    }
+    let duration_ms = if cut_segments.is_empty() {
+        source_duration_ms
+    } else {
+        cut_segments
+            .iter()
+            .map(|segment| segment.end_ms - segment.start_ms)
+            .sum()
+    };
+    let has_subtitles = cues
+        .iter()
+        .any(|cue| !cue.source_text.trim().is_empty() || !cue.target_text.trim().is_empty());
 
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1782,16 +1985,18 @@ where
     tokio::fs::create_dir_all(&temp_dir)
         .await
         .map_err(|error| format!("无法创建烧录临时目录：{error}"))?;
-    let use_raster_overlays = !overlays.is_empty() && !blank_png.is_empty();
+    let use_raster_overlays = has_subtitles && !overlays.is_empty() && !blank_png.is_empty();
     let preparation = if use_raster_overlays {
         write_overlay_timeline(&temp_dir, &overlays, &blank_png, duration_ms)
             .await
             .map(|_| ())
-    } else {
+    } else if has_subtitles {
         let ass_path = temp_dir.join("subtitles.ass");
         tokio::fs::write(&ass_path, build_ass(&cues, &style))
             .await
             .map_err(|error| format!("无法生成烧录字幕：{error}"))
+    } else {
+        Ok(())
     };
     if let Err(error) = preparation {
         let _ = tokio::fs::remove_dir_all(&temp_dir).await;
@@ -1808,13 +2013,39 @@ where
         &video_path,
     ]);
     if use_raster_overlays {
+        command.args(["-f", "concat", "-safe", "0", "-i", "overlay.ffconcat"]);
+    }
+    if !cut_segments.is_empty() {
+        let has_audio = match probe_video_has_audio(&video_path).await {
+            Ok(value) => value,
+            Err(error) => {
+                let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+                return Err(error);
+            }
+        };
+        let (mut filter, cut_video, cut_audio) = build_video_cut_filter(&cut_segments, has_audio);
+        let output_video = if use_raster_overlays {
+            filter.push_str(&format!(
+                ";[1:v][{cut_video}]scale2ref=w=ref_w:h=ref_h[subtitle][base];[base][subtitle]overlay=0:0:format=auto:eof_action=pass[video]"
+            ));
+            "video".to_string()
+        } else if has_subtitles {
+            filter.push_str(&format!(";[{cut_video}]ass=subtitles.ass[video]"));
+            "video".to_string()
+        } else {
+            cut_video
+        };
         command.args([
-            "-f",
-            "concat",
-            "-safe",
-            "0",
-            "-i",
-            "overlay.ffconcat",
+            "-filter_complex",
+            &filter,
+            "-map",
+            &format!("[{output_video}]"),
+        ]);
+        if let Some(audio) = cut_audio {
+            command.args(["-map", &format!("[{audio}]")]);
+        }
+    } else if use_raster_overlays {
+        command.args([
             "-filter_complex",
             "[1:v][0:v]scale2ref=w=ref_w:h=ref_h[subtitle][base];[base][subtitle]overlay=0:0:format=auto:eof_action=pass[video]",
             "-map",
@@ -1822,7 +2053,7 @@ where
             "-map",
             "0:a?",
         ]);
-    } else {
+    } else if has_subtitles {
         command.args(["-vf", "ass=subtitles.ass"]);
     }
     command
@@ -1927,6 +2158,7 @@ async fn burn_video(
     video_path: String,
     output_path: String,
     cues: Vec<BurnCueInput>,
+    video_segments: Vec<BurnSegmentInput>,
     overlay_bundle_base64: String,
     style: BurnStyleInput,
     duration_ms: f64,
@@ -1946,6 +2178,7 @@ async fn burn_video(
         video_path,
         output_path,
         cues,
+        video_segments,
         overlays,
         blank_png,
         style,
@@ -2050,10 +2283,25 @@ pub fn run() {
             sql: "DROP TABLE IF EXISTS jobs;",
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 7,
+            description: "add_project_video_segments",
+            sql: "ALTER TABLE projects ADD COLUMN video_segments TEXT NOT NULL DEFAULT '[]';",
+            kind: MigrationKind::Up,
+        },
+        Migration {
+            version: 8,
+            description: "add_cue_kind",
+            sql: "ALTER TABLE cues ADD COLUMN cue_kind TEXT NOT NULL DEFAULT 'subtitle';",
+            kind: MigrationKind::Up,
+        },
     ];
 
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
+            automation::automation_next,
+            automation::automation_reply,
+            automation::automation_duration,
             download_youtube,
             open_youtube_login,
             review_youtube_subtitle_context,
@@ -2077,10 +2325,11 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_ass, decode_overlay_bundle, export_youtube_cover, find_downloaded_video,
-        is_supported_video_path, next_lossy_line, parse_deepseek_json, parse_progress_micros,
-        parse_term_review_json, run_burn_video, safe_file_name, srt_blocks, validate_youtube_url,
-        youtube_download_error, youtube_id_from_video_path, BurnCueInput, BurnOverlayInput,
+        build_ass, build_video_cut_filter, decode_overlay_bundle, export_youtube_cover,
+        find_downloaded_video, is_supported_video_path, next_lossy_line, parse_deepseek_json,
+        parse_progress_micros, parse_term_review_json, probe_video_duration_ms, run_burn_video,
+        safe_file_name, srt_blocks, validate_youtube_url, youtube_download_error,
+        youtube_id_from_video_path, BurnCueInput, BurnOverlayInput, BurnSegmentInput,
         BurnStyleInput, BASE64,
     };
     use base64::Engine as _;
@@ -2091,6 +2340,7 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
     use tokio::io::BufReader;
+    use tokio::process::Command;
 
     #[test]
     fn accepts_common_youtube_urls() {
@@ -2104,7 +2354,9 @@ mod tests {
         assert!(is_supported_video_path(Path::new("C:/clips/interview.mp4")));
         assert!(is_supported_video_path(Path::new("C:/clips/interview.MKV")));
         assert!(!is_supported_video_path(Path::new("C:/Users/me/.env")));
-        assert!(!is_supported_video_path(Path::new("C:/Users/me/private.txt")));
+        assert!(!is_supported_video_path(Path::new(
+            "C:/Users/me/private.txt"
+        )));
     }
 
     #[test]
@@ -2140,10 +2392,36 @@ mod tests {
     }
 
     #[test]
+    fn builds_video_and_audio_trim_concat_filter() {
+        let (filter, video, audio) = build_video_cut_filter(
+            &[
+                BurnSegmentInput {
+                    start_ms: 0.0,
+                    end_ms: 1_000.0,
+                },
+                BurnSegmentInput {
+                    start_ms: 2_000.0,
+                    end_ms: 4_000.0,
+                },
+            ],
+            true,
+        );
+        assert!(filter.contains("split=2[vsrc0][vsrc1]"));
+        assert!(filter.contains("trim=start=2.000000:end=4.000000"));
+        assert!(filter.contains("concat=n=2:v=1:a=1[cutv][cuta]"));
+        assert_eq!(video, "cutv");
+        assert_eq!(audio.as_deref(), Some("cuta"));
+    }
+
+    #[test]
     fn prepares_safe_project_folder_and_recovers_youtube_id() {
         assert_eq!(safe_file_name("Title: Part 1?"), "Title_ Part 1_");
         assert_eq!(
             youtube_id_from_video_path(r"D:\Downloads\Ontario Road Trips [ueu_5SF_gXc].mp4"),
+            Some("ueu_5SF_gXc".to_string())
+        );
+        assert_eq!(
+            youtube_id_from_video_path(r"D:\Downloads\Ontario Road Trips [ueu_5SF_gXc] rebuilt.mp4"),
             Some("ueu_5SF_gXc".to_string())
         );
         assert_eq!(youtube_id_from_video_path(r"D:\Videos\local.mp4"), None);
@@ -2160,8 +2438,8 @@ mod tests {
         let exports = directory.join("exports");
         tokio::fs::create_dir_all(&downloads).await.unwrap();
         tokio::fs::create_dir_all(&exports).await.unwrap();
-        let video = downloads.join("Example [dQw4w9WgXcQ].mp4");
-        let cached_cover = downloads.join("Example [dQw4w9WgXcQ].jpg");
+        let video = downloads.join("Example [dQw4w9WgXcQ] rebuilt.mp4");
+        let cached_cover = downloads.join("dQw4w9WgXcQ.video-subs-thumb.jpg");
         let output = exports.join("Example.burned.mp4");
         tokio::fs::write(&video, b"video").await.unwrap();
         tokio::fs::write(&cached_cover, b"jpeg fixture")
@@ -2287,6 +2565,7 @@ mod tests {
                 target_text: "烧录字幕".to_string(),
                 style: None,
             }],
+            vec![],
             vec![BurnOverlayInput {
                 start_ms: 0.0,
                 end_ms: 900.0,
@@ -2304,6 +2583,97 @@ mod tests {
             .any(|percent| *percent > 0.0 && *percent < 100.0));
         assert!(progress.last().is_some_and(|percent| *percent == 100.0));
         assert!(output.metadata().unwrap().len() > 1_000);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires FFmpeg"]
+    async fn cuts_and_joins_selected_video_segments() {
+        if Command::new("ffmpeg")
+            .arg("-version")
+            .output()
+            .await
+            .is_err()
+        {
+            return;
+        }
+        let directory = std::env::temp_dir().join(format!(
+            "lingocast-cut-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let input = directory.join("input.mp4");
+        let output = directory.join("output.mp4");
+        let status = Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=blue:s=320x180:r=30:d=4",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=4",
+                "-shortest",
+                "-c:v",
+                "libx264",
+                "-c:a",
+                "aac",
+                input.to_str().unwrap(),
+            ])
+            .status()
+            .await
+            .unwrap();
+        assert!(status.success());
+        let transparent_png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+        let transparent_png_bytes = BASE64.decode(transparent_png).unwrap();
+        let result = run_burn_video(
+            input.to_string_lossy().into_owned(),
+            output.to_string_lossy().into_owned(),
+            vec![BurnCueInput {
+                start_ms: 0.0,
+                end_ms: 2_000.0,
+                source_text: "Cut subtitle".to_string(),
+                target_text: "剪辑字幕".to_string(),
+                style: None,
+            }],
+            vec![
+                BurnSegmentInput {
+                    start_ms: 0.0,
+                    end_ms: 1_000.0,
+                },
+                BurnSegmentInput {
+                    start_ms: 2_000.0,
+                    end_ms: 3_000.0,
+                },
+            ],
+            vec![BurnOverlayInput {
+                start_ms: 0.0,
+                end_ms: 2_000.0,
+                png_bytes: transparent_png_bytes.clone(),
+            }],
+            transparent_png_bytes,
+            BurnStyleInput::default(),
+            2_000.0,
+            |_| {},
+        )
+        .await;
+        assert!(result.is_ok(), "{result:?}");
+        let duration = probe_video_duration_ms(output.to_str().unwrap())
+            .await
+            .unwrap();
+        assert!(
+            (1_950.0..=2_100.0).contains(&duration),
+            "duration was {duration}"
+        );
         let _ = std::fs::remove_dir_all(directory);
     }
 

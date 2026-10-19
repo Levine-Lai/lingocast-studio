@@ -1,4 +1,5 @@
 import { normalizeSubtitleStyle, type SubtitleCue, type SubtitleStyle } from "../types";
+import { buildSubtitleRenderSegments, type TrackedSubtitleCue } from "./subtitleTracks";
 
 export const SUBTITLE_CANVAS_WIDTH = 1920;
 export const SUBTITLE_CANVAS_HEIGHT = 1080;
@@ -61,7 +62,68 @@ const AWKWARD_LINE_START_WORDS = new Set([
   "and", "as", "at", "but", "by", "for", "from", "if", "in", "of", "on", "or", "to", "with",
 ]);
 
+// Intl.Segmenter handles most Chinese prose well, but it still splits some
+// domain terms (for example, `髋臼` becomes `髋` + `臼`). Keep the vocabulary
+// that commonly appears in sports-medicine subtitles atomic so a line break
+// can never land inside the term.
+const PROTECTED_CJK_TERMS = [
+  "前交叉韧带", "后交叉韧带", "内侧副韧带", "外侧副韧带", "股骨髋臼关节",
+  "肩锁关节", "三角韧带", "跟腱", "半月板", "股骨头", "髋关节", "髋臼",
+  "踝关节", "膝关节", "肩关节", "肘关节", "腕关节", "四分卫",
+  "锁骨", "肩胛骨", "肱骨", "尺骨", "桡骨", "股骨", "胫骨", "腓骨", "距骨",
+].toSorted((left, right) => right.length - left.length);
+
+const CJK_CHARACTER = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
+const CLOSING_PUNCTUATION = /^[，。！？、；：,.!?;:）】》〉」』”’％%…]+$/u;
+const OPENING_PUNCTUATION = /^[（【《〈「『“‘]+$/u;
+
+function mixedCjkTokens(text: string) {
+  const segmenter = new Intl.Segmenter("zh-CN", { granularity: "word" });
+  const pieces: Array<{ text: string; gapBefore: boolean }> = [];
+  let cursor = 0;
+  let gapBefore = false;
+
+  while (cursor < text.length) {
+    const whitespace = text.slice(cursor).match(/^\s+/u)?.[0];
+    if (whitespace) {
+      gapBefore = true;
+      cursor += whitespace.length;
+      continue;
+    }
+
+    const protectedTerm = PROTECTED_CJK_TERMS.find((term) => text.startsWith(term, cursor));
+    const segment = protectedTerm
+      ?? segmenter.segment(text.slice(cursor))[Symbol.iterator]().next().value?.segment
+      ?? Array.from(text.slice(cursor))[0];
+    if (!segment) break;
+    pieces.push({ text: segment, gapBefore });
+    gapBefore = false;
+    cursor += segment.length;
+  }
+
+  const tokens: string[] = [];
+  let opening = "";
+  for (const piece of pieces) {
+    if (CLOSING_PUNCTUATION.test(piece.text) && tokens.length) {
+      tokens[tokens.length - 1] += piece.text;
+      continue;
+    }
+    if (OPENING_PUNCTUATION.test(piece.text)) {
+      opening += piece.text;
+      continue;
+    }
+    const gap = piece.gapBefore && tokens.length ? " " : "";
+    tokens.push(`${gap}${opening}${piece.text}`);
+    opening = "";
+  }
+  if (opening && tokens.length) tokens[tokens.length - 1] += opening;
+  return tokens;
+}
+
 function wrapTokens(text: string) {
+  if (CJK_CHARACTER.test(text)) {
+    return { tokens: mixedCjkTokens(text), separator: "" };
+  }
   const usesWordSpacing = /\s/.test(text.trim());
   return {
     tokens: usesWordSpacing ? text.trim().split(/\s+/).filter(Boolean) : Array.from(text.trim()),
@@ -79,7 +141,7 @@ export function balanceSubtitleLines(text: string, maxWidth: number, measure: (v
   if (!trimmed || measure(trimmed) <= maxWidth) return [trimmed];
   const { tokens, separator } = wrapTokens(trimmed);
   if (tokens.length < 2) return [trimmed];
-  const value = (start: number, end: number) => tokens.slice(start, end).join(separator);
+  const value = (start: number, end: number) => tokens.slice(start, end).join(separator).trim();
 
   const greedy: string[] = [];
   let start = 0;
@@ -92,8 +154,7 @@ export function balanceSubtitleLines(text: string, maxWidth: number, measure: (v
   const lineCount = greedy.length;
   if (lineCount <= 1) return greedy;
 
-  const targetWidth = tokens.reduce((sum, token) => sum + measure(token), 0) / lineCount
-    + measure(separator) * Math.max(0, tokens.length - lineCount) / lineCount;
+  const targetWidth = measure(trimmed) / lineCount;
   const memo = new Map<string, { score: number; lines: string[] } | null>();
 
   function solve(tokenIndex: number, lineIndex: number): { score: number; lines: string[] } | null {
@@ -142,13 +203,16 @@ function visualLines(
   color: string,
   style: SubtitleStyle,
 ) {
-  context.font = canvasFont(style, fontSize, fontFamily);
-  return text
-    .replace(/\r/g, "")
-    .split("\n")
-    .flatMap((line) => wrapLine(context, line.trim(), SUBTITLE_CANVAS_WIDTH * 0.88))
-    .filter(Boolean)
-    .map((line) => ({ text: line, fontSize, fontFamily, color }));
+  const paragraphs = text.replace(/\r/g, "").split("\n").map((line) => line.trim()).filter(Boolean);
+  let fittedSize = fontSize;
+  let lines: string[] = [];
+  do {
+    context.font = canvasFont(style, fittedSize, fontFamily);
+    lines = paragraphs.flatMap((line) => wrapLine(context, line, SUBTITLE_CANVAS_WIDTH * 0.88));
+    if (lines.length <= 2 || fittedSize <= 24) break;
+    fittedSize -= 2;
+  } while (true);
+  return lines.filter(Boolean).map((line) => ({ text: line, fontSize: fittedSize, fontFamily, color }));
 }
 
 function roundedRect(
@@ -317,21 +381,58 @@ export async function renderSubtitleDataUrl(cue: SubtitleCue, style: SubtitleSty
   return URL.createObjectURL(blob);
 }
 
+export function trackedSubtitleStyle(
+  item: TrackedSubtitleCue,
+  projectStyle: SubtitleStyle,
+) {
+  const style = normalizeSubtitleStyle({ ...projectStyle, ...item.cue.subtitleStyle });
+  if (item.track === 1 && item.cue.subtitleStyle?.positionY === undefined) {
+    style.positionY = Math.min(80, style.positionY + 16);
+  }
+  return style;
+}
+
+export async function renderSubtitleGroupPng(
+  cues: TrackedSubtitleCue[],
+  projectStyle: SubtitleStyle,
+  reusableCanvas?: HTMLCanvasElement,
+  reusableLayerCanvas?: HTMLCanvasElement,
+) {
+  const canvas = reusableCanvas ?? document.createElement("canvas");
+  canvas.width = SUBTITLE_CANVAS_WIDTH;
+  canvas.height = SUBTITLE_CANVAS_HEIGHT;
+  const context = canvas.getContext("2d");
+  if (!context) throw new Error("无法初始化双轨字幕画布");
+  const layerCanvas = reusableLayerCanvas ?? document.createElement("canvas");
+
+  for (const item of cues.toSorted((left, right) => left.track - right.track)) {
+    if (!item.cue.sourceText.trim() && !item.cue.targetText.trim()) continue;
+    const layer = await renderSubtitlePng(item.cue, trackedSubtitleStyle(item, projectStyle), layerCanvas);
+    const bitmap = await createImageBitmap(layer);
+    context.drawImage(bitmap, 0, 0);
+    bitmap.close();
+  }
+  return canvasToPng(canvas);
+}
+
+export async function renderSubtitleGroupDataUrl(cues: TrackedSubtitleCue[], projectStyle: SubtitleStyle) {
+  return URL.createObjectURL(await renderSubtitleGroupPng(cues, projectStyle));
+}
+
 export async function renderBurnOverlays(
   cues: SubtitleCue[],
   projectStyle: SubtitleStyle,
   onProgress: (percent: number) => void,
 ) {
-  const renderTimeline = buildSubtitleRenderTimeline(cues);
+  const renderTimeline = buildSubtitleRenderSegments(cues);
   const overlays: BurnOverlay[] = [];
   // Keep preview and export rendering identical while avoiding a new 1080p
   // canvas allocation for every cue in long videos.
   const reusableCanvas = document.createElement("canvas");
-  for (const [index, cue] of renderTimeline.entries()) {
-    if (!cue.sourceText.trim() && !cue.targetText.trim()) continue;
-    const style = normalizeSubtitleStyle({ ...projectStyle, ...cue.subtitleStyle });
-    const png = await renderSubtitlePng(cue, style, reusableCanvas);
-    overlays.push({ startMs: cue.startMs, endMs: cue.endMs, png });
+  const reusableLayerCanvas = document.createElement("canvas");
+  for (const [index, segment] of renderTimeline.entries()) {
+    const png = await renderSubtitleGroupPng(segment.cues, projectStyle, reusableCanvas, reusableLayerCanvas);
+    overlays.push({ startMs: segment.startMs, endMs: segment.endMs, png });
     onProgress(((index + 1) / Math.max(1, renderTimeline.length)) * 10);
     if (index % 2 === 1) await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
   }

@@ -8,11 +8,14 @@
 !/.env.example
 !/LICENSE
 !/README.md
+!/context.md
+!/AGENTS.md
 !/desktop/
 
 # Dependencies and generated build output
 /desktop/node_modules/
 /desktop/dist/
+/desktop/portable/
 /desktop/src-tauri/target/
 /desktop/src-tauri/gen/
 /desktop/worker/__pycache__/

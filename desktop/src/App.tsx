@@ -6,9 +6,11 @@ import { Timeline } from "./components/Timeline";
 import { VideoPreview } from "./components/VideoPreview";
 import { YoutubeImportDialog } from "./components/YoutubeImportDialog";
 import { useStudio } from "./hooks/useStudio";
+import { useAutomation } from "./hooks/useAutomation";
 import { burnSubtitleVideo, downloadYoutubeVideo, exportSubtitleFile, isTauri, pickSubtitleFile, pickVideoFile, reviewYoutubeSubtitleContext, translateSubtitleCues } from "./lib/platform";
 import { applySubtitleCorrections, buildBilingualCues, parseSrt, resegmentCues, splitSubtitleText } from "./lib/srt";
-import type { SubtitleCue, SubtitleStyle, YoutubeDownloadState } from "./types";
+import { hasVideoCuts, normalizeVideoSegments, remapCuesToEditedVideo, setVideoSegmentRemoved, splitVideoSegment } from "./lib/videoEdits";
+import { DEFAULT_NOTE_SUBTITLE_STYLE, type SubtitleCue, type SubtitleStyle, type YoutubeDownloadState } from "./types";
 
 const IDLE_DOWNLOAD: YoutubeDownloadState = {
   active: false,
@@ -26,7 +28,7 @@ type LayoutPreferences = {
 };
 
 const DEFAULT_LAYOUT: LayoutPreferences = {
-  timelineHeight: 170,
+  timelineHeight: 184,
   cueListHeight: 250,
   cueRowHeight: 96,
 };
@@ -62,6 +64,7 @@ export default function App() {
   const automaticTranslationAttempts = useRef(new Set<string>());
   const shortcutHandlerRef = useRef<(event: KeyboardEvent) => void>(() => undefined);
   const [currentMs, setCurrentMs] = useState(0);
+  const [selectedVideoSegmentId, setSelectedVideoSegmentId] = useState<string | null>(null);
   const [notice, setNotice] = useState("");
   const [youtubeDialogOpen, setYoutubeDialogOpen] = useState(false);
   const [youtubeDownload, setYoutubeDownload] = useState<YoutubeDownloadState>(IDLE_DOWNLOAD);
@@ -71,6 +74,7 @@ export default function App() {
   const [videoExportProgress, setVideoExportProgress] = useState(0);
   const [playbackToggleSignal, setPlaybackToggleSignal] = useState(0);
   const [playing, setPlaying] = useState(false);
+  useAutomation(studio, subtitleProcessing || videoExporting || youtubeDownload.active);
   const [layout, setLayout] = useState(readLayoutPreferences);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
     try {
@@ -168,7 +172,16 @@ export default function App() {
   useEffect(() => {
     setCurrentMs(0);
     setPlaying(false);
+    setSelectedVideoSegmentId(null);
   }, [studio.project?.id]);
+
+  useEffect(() => {
+    const project = studio.project;
+    if (!project || !selectedVideoSegmentId) return;
+    if (!normalizeVideoSegments(project.videoSegments, project.durationMs).some((segment) => segment.id === selectedVideoSegmentId)) {
+      setSelectedVideoSegmentId(null);
+    }
+  }, [selectedVideoSegmentId, studio.project]);
 
   useEffect(() => {
     if (!playing || !studio.project) return;
@@ -220,7 +233,7 @@ export default function App() {
       frame = window.requestAnimationFrame(() => {
         const requested = startValue - (pointer.clientY - startY);
         setLayout((current) => panel === "timeline"
-          ? { ...current, timelineHeight: clampLayout(requested, 96, window.innerHeight * 0.52) }
+          ? { ...current, timelineHeight: clampLayout(requested, 154, window.innerHeight * 0.52) }
           : { ...current, cueListHeight: clampLayout(requested, 130, window.innerHeight * 0.58) });
       });
     };
@@ -349,7 +362,7 @@ export default function App() {
         setYoutubeDownload({
           active: true,
           percent: 97,
-          status: "DeepSeek 正在翻译",
+          status: "正在生成中文字幕",
           detail: `正在处理 ${generatedCues.length} 条完整语句`,
         });
         try {
@@ -368,7 +381,7 @@ export default function App() {
       if (!project) throw new Error("视频已下载，但创建本地项目失败");
       setYoutubeDownload({ active: false, percent: 100, status: "下载完成", detail: "" });
       setYoutubeDialogOpen(false);
-      if (translationError) studio.setError(`英文字幕和断句已生成，但 DeepSeek 翻译失败：${translationError}`);
+      if (translationError) studio.setError(`英文字幕和断句已生成，但中文字幕生成失败：${translationError}`);
       else if (reviewWarning) studio.setError(`字幕已生成，但导入前专名预审未完成，翻译阶段仍已按上下文校正：${reviewWarning}`);
       setNotice(bilingualCount
         ? `已自动整理并生成 ${preparedCues.length} 条中英字幕`
@@ -395,13 +408,13 @@ export default function App() {
     } catch (reason) {
       await studio.replaceCuesAndSave(organized);
       const message = reason instanceof Error ? reason.message : String(reason);
-      studio.setError(`断句已整理为 ${organized.length} 条，但 DeepSeek 翻译失败：${message}`);
+      studio.setError(`断句已整理为 ${organized.length} 条，但中文字幕生成失败：${message}`);
     } finally {
       setSubtitleProcessing(false);
     }
   }
 
-  function addCue() {
+  function addCue(kind: "subtitle" | "note" = "subtitle") {
     if (!studio.project) return;
     const cue: SubtitleCue = {
       id: crypto.randomUUID(),
@@ -412,6 +425,8 @@ export default function App() {
       sourceText: "",
       targetText: "",
       status: "draft",
+      kind,
+      subtitleStyle: kind === "note" ? { ...DEFAULT_NOTE_SUBTITLE_STYLE } : undefined,
     };
     studio.replaceCues([...studio.project.cues, cue]);
     studio.setSelectedCueId(cue.id);
@@ -475,14 +490,51 @@ export default function App() {
     studio.updateCue(cue.id, { startMs: cue.startMs + applied, endMs: cue.endMs + applied });
   }
 
+  function splitVideoAtPlayhead() {
+    const project = studio.project;
+    if (!project?.durationMs) return;
+    const result = splitVideoSegment(project.videoSegments, project.durationMs, currentMs);
+    if (!result.selectedId) {
+      setNotice("播放头距离片段边缘太近，无法分割");
+      return;
+    }
+    studio.updateProject((current) => ({ ...current, videoSegments: result.segments }));
+    setSelectedVideoSegmentId(result.selectedId);
+    setNotice("已在播放头处分割视频");
+  }
+
+  function deleteSelectedVideoSegment() {
+    const project = studio.project;
+    if (!project || !selectedVideoSegmentId) return;
+    const segments = normalizeVideoSegments(project.videoSegments, project.durationMs);
+    const selected = segments.find((segment) => segment.id === selectedVideoSegmentId);
+    if (!selected) return;
+    if (!selected.removed && segments.filter((segment) => !segment.removed).length <= 1) {
+      studio.setError("至少需要保留一个视频片段");
+      return;
+    }
+    studio.updateProject((current) => ({
+      ...current,
+      videoSegments: setVideoSegmentRemoved(segments, selectedVideoSegmentId, true),
+    }));
+    const next = segments.find((segment) => !segment.removed && segment.startMs >= selected.endMs)
+      ?? segments.find((segment) => !segment.removed);
+    if (next) setCurrentMs(next.startMs);
+    setSelectedVideoSegmentId(null);
+    setNotice("该片段已直接移除，可使用撤销恢复");
+  }
+
   async function exportSrt() {
     if (!studio.project) return;
-    const completed = await exportSubtitleFile(studio.project.name, studio.project.cues);
+    const cues = hasVideoCuts(studio.project.videoSegments)
+      ? remapCuesToEditedVideo(studio.project.cues, studio.project.videoSegments, studio.project.durationMs)
+      : studio.project.cues;
+    const completed = await exportSubtitleFile(studio.project.name, cues);
     if (completed) setNotice("双语 SRT 已导出");
   }
 
   async function exportBurnedVideo() {
-    if (!studio.project?.cues.length || videoExporting) return;
+    if (!studio.project || videoExporting) return;
     studio.setError("");
     setVideoExporting(true);
     setVideoExportProgress(0);
@@ -561,15 +613,15 @@ export default function App() {
             <button type="button" onClick={openYoutubeDialog}>YouTube 网址</button>
             <button type="button" onClick={() => void importSubtitle()} disabled={!studio.project}>导入 SRT</button>
             <button type="button" onClick={() => void organizeAndTranslate()} disabled={!studio.project?.cues.length || subtitleProcessing}>
-              {subtitleProcessing ? "DeepSeek 处理中…" : "整理并翻译"}
+              {subtitleProcessing ? "翻译处理中…" : "整理并翻译"}
             </button>
-            <button type="button" onClick={addCue} disabled={!studio.project}>新增字幕</button>
+            <button type="button" onClick={() => addCue("subtitle")} disabled={!studio.project}>新增字幕</button>
             <button className="primary" type="button" onClick={() => void studio.save()} disabled={!studio.project || studio.saving || !studio.dirty}>
               {studio.saving ? "保存中…" : "保存 Ctrl+S"}
             </button>
             <button type="button" onClick={() => void exportSrt()} disabled={!studio.project?.cues.length}>导出字幕</button>
-            <button className="export" type="button" onClick={() => void exportBurnedVideo()} disabled={!studio.project?.cues.length || videoExporting}>
-              {videoExporting ? "正在烧录…" : "烧录导出视频"}
+            <button className="export" type="button" onClick={() => void exportBurnedVideo()} disabled={!studio.project || videoExporting}>
+              {videoExporting ? "正在导出…" : "导出视频"}
             </button>
           </div>
         </header>
@@ -583,7 +635,7 @@ export default function App() {
             aria-valuemax={100}
             aria-valuenow={Math.round(videoExportProgress)}
           >
-            <div><span>正在烧录中英字幕视频</span><strong>{videoExportProgress.toFixed(1)}%</strong></div>
+            <div><span>正在生成剪辑视频和字幕</span><strong>{videoExportProgress.toFixed(1)}%</strong></div>
             <progress max="100" value={videoExportProgress} />
             <small>编码期间请保持软件打开，完成后会显示保存位置</small>
           </div>
@@ -608,6 +660,8 @@ export default function App() {
                 source={studio.project.videoUrl}
                 projectName={studio.project.name}
                 cues={studio.project.cues}
+                selectedCueId={studio.selectedCueId}
+                videoSegments={studio.project.videoSegments}
                 currentMs={currentMs}
                 playbackToggleSignal={playbackToggleSignal}
                 subtitleStyle={studio.project.subtitleStyle}
@@ -640,12 +694,26 @@ export default function App() {
                 currentMs={currentMs}
                 playing={playing}
                 selectedCueId={studio.selectedCueId}
+                videoSegments={studio.project.videoSegments}
+                selectedVideoSegmentId={selectedVideoSegmentId}
                 onSeek={setCurrentMs}
                 onSelect={studio.setSelectedCueId}
                 onUpdate={studio.updateCue}
+                onSelectVideoSegment={setSelectedVideoSegmentId}
               />
               <div className="edit-tools" role="toolbar" aria-label="字幕条目工具">
-                <button type="button" onClick={addCue} title="在播放头位置创建字幕">＋新增字幕块</button>
+                <button type="button" onClick={splitVideoAtPlayhead} disabled={!studio.project.durationMs} title="在当前播放头位置把视频切成两个片段">✂ 分割视频</button>
+                <button
+                  className="remove-segment"
+                  type="button"
+                  onClick={deleteSelectedVideoSegment}
+                  disabled={!selectedVideoSegmentId}
+                  title="原视频文件不会被删除"
+                >
+                  删除片段
+                </button>
+                <button type="button" onClick={() => addCue("subtitle")} title="在播放头位置创建主字幕">＋新增字幕块</button>
+                <button type="button" onClick={() => addCue("note")} title="在播放头位置创建画面正中上方的注释">＋新增注释</button>
                 <button type="button" onClick={studio.undo} disabled={!studio.canUndo} title="Ctrl+Z">撤销</button>
                 <button type="button" onClick={studio.redo} disabled={!studio.canRedo} title="Ctrl+Y / Ctrl+Shift+Z">重做</button>
                 <button type="button" onClick={() => shiftCue(-100)} disabled={!studio.selectedCue}>−100ms</button>

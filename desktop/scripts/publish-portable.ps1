@@ -4,6 +4,18 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+function Get-Sha256Hex([string]$Path) {
+  $sha256 = [System.Security.Cryptography.SHA256]::Create()
+  $stream = [System.IO.File]::OpenRead($Path)
+  try {
+    return ([System.BitConverter]::ToString($sha256.ComputeHash($stream))).Replace("-", "")
+  }
+  finally {
+    $stream.Dispose()
+    $sha256.Dispose()
+  }
+}
+
 $desktopProject = Split-Path -Parent $PSScriptRoot
 $packagePath = Join-Path $desktopProject "package.json"
 $tauriConfigPath = Join-Path $desktopProject "src-tauri\tauri.conf.json"
@@ -44,10 +56,10 @@ if (-not (Test-Path -LiteralPath $sourceExecutable -PathType Leaf)) {
 
 New-Item -ItemType Directory -Path $portableDirectory -Force | Out-Null
 
-$sourceHash = (Get-FileHash -LiteralPath $sourceExecutable -Algorithm SHA256).Hash
+$sourceHash = Get-Sha256Hex $sourceExecutable
 $copyRequired = -not (Test-Path -LiteralPath $portableExecutable -PathType Leaf)
 if (-not $copyRequired) {
-  $portableHash = (Get-FileHash -LiteralPath $portableExecutable -Algorithm SHA256).Hash
+  $portableHash = Get-Sha256Hex $portableExecutable
   $copyRequired = $sourceHash -ne $portableHash
 }
 
@@ -83,6 +95,19 @@ $savedShortcut = $shell.CreateShortcut($shortcutPath)
 if ($savedShortcut.TargetPath -ne $portableExecutable) {
   throw "Shortcut verification failed. Expected '$portableExecutable', got '$($savedShortcut.TargetPath)'."
 }
+
+if ((Get-Sha256Hex $portableExecutable) -ne $sourceHash) {
+  throw "Published executable hash does not match the build."
+}
+$manifest = @{
+  version = $version
+  file = [System.IO.Path]::GetFileName($portableExecutable)
+  sha256 = $sourceHash.ToLowerInvariant()
+  publishedAt = [DateTime]::UtcNow.ToString("o")
+} | ConvertTo-Json
+[System.IO.File]::WriteAllText((Join-Path $portableDirectory "latest.json"), $manifest, $utf8)
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot "agent.mjs") -Destination (Join-Path $portableDirectory "agent.mjs") -Force
+Copy-Item -LiteralPath (Join-Path $desktopProject "AUTOMATION.md") -Destination (Join-Path $portableDirectory "AUTOMATION.md") -Force
 
 Write-Host "Portable release: $portableExecutable"
 Write-Host "Desktop shortcut: $shortcutPath"

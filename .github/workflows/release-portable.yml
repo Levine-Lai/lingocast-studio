@@ -68,12 +68,21 @@ jobs:
         shell: pwsh
         run: |
           $name = "LingoCast Studio_$env:LINGOCAST_VERSION`_portable.exe"
-          Copy-Item -LiteralPath "src-tauri/target/release/lingocast-studio.exe" -Destination $name
+          New-Item -ItemType Directory -Path portable -Force | Out-Null
+          Copy-Item -LiteralPath "src-tauri/target/release/lingocast-studio.exe" -Destination "portable/$name"
+          Copy-Item -LiteralPath "scripts/agent.mjs" -Destination "portable/agent.mjs"
+          Copy-Item -LiteralPath "AUTOMATION.md" -Destination "portable/AUTOMATION.md"
+          @{
+            version = $env:LINGOCAST_VERSION
+            file = $name
+            sha256 = (Get-FileHash -LiteralPath "portable/$name" -Algorithm SHA256).Hash.ToLowerInvariant()
+            publishedAt = [DateTime]::UtcNow.ToString("o")
+          } | ConvertTo-Json | Set-Content -LiteralPath "portable/latest.json" -Encoding utf8NoBOM
 
       - name: Upload portable executable
         uses: actions/upload-artifact@v7
         with:
           name: LingoCast-Studio-Windows-${{ github.run_number }}
-          path: desktop/LingoCast Studio_*_portable.exe
+          path: desktop/portable/*
           if-no-files-found: error
           retention-days: 90

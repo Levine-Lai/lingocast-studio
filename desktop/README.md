@@ -19,10 +19,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-portable.ps1
 
 面向个人使用的本地视频字幕工作台。桌面壳使用 Tauri 2，界面使用 React + TypeScript，项目和字幕数据保存在本机 SQLite 中。
 
-## 当前版本（0.8.8）
+## 当前版本（0.9.2）
 
 - 导入本地视频和 SRT 字幕
-- 粘贴单个 YouTube 视频网址，自动获取英文字幕并通过 DeepSeek 生成中文字幕；缺失翻译会自动缩小范围重试并逐条补译
+- 粘贴单个 YouTube 视频网址，自动获取英文字幕并通过免密钥的 MyMemory 翻译接口生成中文字幕
 - 字幕编辑自动保存，切换项目不会丢失译文；旧的纯英文项目打开后会自动补齐并保存中文字幕
 - 自动把 YouTube 滚动字幕重组为完整、连贯且不重叠的语句
 - 视频预览、字幕叠加和时间轴定位
@@ -46,7 +46,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-portable.ps1
 - 本地项目保存与双语 SRT 导出
 - Python 媒体工作进程协议与 FFmpeg / yt-dlp 能力探测
 
-YouTube 下载需要系统能够找到 `yt-dlp` 和 FFmpeg。DeepSeek 配置保存在 `%APPDATA%\com.lingocast.studio\.env.local`，需要 `DEEPSEEK_API_KEY`，可选 `DEEPSEEK_API_BASE` 和 `DEEPSEEK_MODEL`。没有英文字幕的视频仍需要下一阶段的语音识别能力。
+YouTube 下载需要系统能够找到 `yt-dlp` 和 FFmpeg。中文字幕默认使用免密钥的 MyMemory REST API，不再需要 DeepSeek 配置。没有英文字幕的视频会使用本地语音识别回退。
 
 ## 开发
 
@@ -71,3 +71,9 @@ npm run release:portable
 推送更新到 GitHub 的 `main` 分支后，仓库级 GitHub Actions 会自动运行测试、构建便携 EXE，并把它作为该次运行的 Artifact 保留 90 天。普通更新不要求修改版本号，也不会自动创建 GitHub Release。
 
 媒体工作进程说明见 [`worker/README.md`](worker/README.md)。
+
+## Agent 操作
+
+见 [AUTOMATION.md](AUTOMATION.md)。`node scripts/agent.mjs --launch` 启动经过哈希校验的本机最新发布版，`status` 检查运行版本。支持 JSON 请求批量编辑字幕、样式与剪辑，并使用同一渲染链烧录 MP4。
+
+0.9.2 同时包含独立注释字幕、多轨重叠字幕渲染、视频分割/移除/拼接，以及字幕导入与对齐改进。

@@ -277,6 +277,7 @@ export function useStudio() {
   );
 
   return {
+    refreshProjects,
     projects,
     project,
     selectedCue,
